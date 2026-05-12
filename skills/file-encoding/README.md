@@ -2,6 +2,8 @@
 
 Handles multi-encoding source files in Windows C++ projects: ANSI (GBK/Shift-JIS/EUC-KR/Big5), UTF-8 BOM, UTF-16 LE BOM. Prevents encoding corruption when using Claude Code's Edit/Write tools which default to UTF-8.
 
+> **Note:** Currently tested on Windows only (Python 2.7 & 3.x). Linux/macOS may work but not validated.
+
 ## Installation
 
 ### gh skill (recommended)
