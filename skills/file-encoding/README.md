@@ -4,10 +4,24 @@ Handles multi-encoding source files in Windows C++ projects: ANSI (GBK/Shift-JIS
 
 ## Installation
 
+### gh skill (recommended)
+
+```bash
+gh skill install <owner>/artifact-skills file-encoding
+```
+
+Or search first:
+```bash
+gh skill search file-encoding
+gh skill preview <owner>/artifact-skills file-encoding
+```
+
+### Manual
+
 ```bash
 mkdir -p ~/.claude/skills/file-encoding/scripts
-cp encoding_utils.py ~/.claude/skills/file-encoding/scripts/
 cp SKILL.md ~/.claude/skills/file-encoding/
+cp scripts/encoding_utils.py ~/.claude/skills/file-encoding/scripts/
 ```
 
 Restart Claude Code. The skill auto-loads.
