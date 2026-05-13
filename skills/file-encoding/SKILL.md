@@ -1,6 +1,6 @@
 ---
 name: file-encoding
-description: Handles multi-encoding files (ANSI/UTF-8/UTF-16 LE BOM) in Windows C++ projects. Detect encoding before editing .cpp/.h/.py/.nsi/.ini/.xml files to avoid corruption.
+description: Handles multi-encoding files (ANSI/UTF-8/UTF-16 LE BOM) in Windows C++ projects. Detect encoding before editing .cpp/.h/.py/.nsi/.ini/.xml/.bat files to avoid corruption.
 version: 1.0.0
 author: longhun12346
 license: MIT
@@ -20,6 +20,7 @@ C++ project detection: `.vcxproj` / `CMakeLists.txt` / `stdafx.h` / `#include <w
 | File type | Encoding | Notes |
 |-----------|----------|-------|
 | `.cpp` `.h` `.rc` | **System ANSI** | GBK / Shift-JIS / EUC-KR / Big5 depending on system locale |
+| `.bat` (build scripts) | **System ANSI** | CMD reads as ANSI; UTF-8 without BOM garbles non-ASCII |
 | `.nsi` | UTF-8 BOM or UTF-16 LE BOM | Never assume, always `detect` |
 | `.ini` (GetPrivateProfileStringW) | **UTF-16 LE BOM** | Non-ASCII garbled without BOM |
 | `.py` (build scripts) | UTF-8 BOM | |
