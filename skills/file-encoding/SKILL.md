@@ -35,6 +35,7 @@ python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py detect <file>
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read <file> [--enc E]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write <file> --enc E
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py replace <file> --old S --new T [--enc E]
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-edit <file> --old S --new T
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py --version
 ```
 
@@ -45,19 +46,28 @@ Encoding names: `gbk` `shift-jis` `euc-kr` `big5` `utf-8` `utf-8-bom` `utf-16-le
 ### Existing files
 
 ```
-detect -> utf-8 (no BOM) -> Edit/Write tools
-detect -> other          -> encoding_utils.py replace   (simple)
-                         -> read -> edit tmp.txt -> write (complex)
+detect -> utf-8 (no BOM) -> Edit/Write tools OK
+detect -> utf-8-bom      -> safe-edit or replace   (BOM ≠ utf-8! Edit tool may strip BOM)
+detect -> other (GBK...) -> safe-edit or replace
+                          -> read -> edit tmp.txt -> write (complex edits)
 ```
 
+**`utf-8-bom` is NOT `utf-8`.** The BOM makes them different. Edit/Write tools treat `utf-8-bom` as plain UTF-8 and may strip or corrupt the BOM. NSI/Python build scripts depend on BOM — if stripped, NSIS/MSVC reads garbled text.
+
 ```bash
-# Simple replace
+# Preferred: safe-edit (auto-detect + replace, one command, safe for ALL encodings)
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-edit "file.cpp" --old "old" --new "new"
+
+# Explicit replace (same safety, allows --enc override)
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py replace "file.cpp" --old "old" --new "new"
 
-# Complex edit
+# Complex edit (multi-spot changes)
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read "file.cpp" > tmp.txt
-# ... edit tmp.txt ...
+# ... edit tmp.txt with any UTF-8 editor ...
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write "file.cpp" --enc gbk < tmp.txt
+
+# utf-8 (no BOM) only: Edit tool shortcuts are fine
+# e.g. Edit("file.xml", old, new) or Write("file.xml", content) — XML files are UTF-8
 ```
 
 ### New files
@@ -71,7 +81,8 @@ python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write "new.cpp" --enc gbk <
 
 ## Pitfalls
 
-- **Edit/Write on non-UTF-8** -> garbled text. Use `replace` or read->edit->write instead.
+- **`utf-8-bom` ≠ `utf-8`** — Edit/Write tools may strip BOM. `detect` first, use `safe-edit` if result is `utf-8-bom`.
+- **Edit/Write on GBK/ANSI/UTF-16** -> garbled text. Use `safe-edit`, `replace`, or read->edit->write.
 - **`.nsi` encoding not fixed** -> UTF-8 BOM or UTF-16 LE BOM. Always `detect` first.
 - **INI without BOM** -> `GetPrivateProfileStringW` reads as ANSI, corrupting non-ASCII. Must be UTF-16 LE BOM.
 - **Python `\6` octal escape** -> in non-raw strings, `Software\kingsoft\Office\6.0` has hidden control chars. Use raw string `r'...'` or `\\\\`.

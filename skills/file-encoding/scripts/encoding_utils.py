@@ -263,6 +263,36 @@ def cmd_replace(args):
     return 0
 
 
+def cmd_safe_edit(args):
+    """Detect encoding + replace in one command. No encoding knowledge required."""
+    enc = detect_encoding(args.file)
+    if enc == 'binary':
+        sys.stderr.write("ERROR: cannot edit binary file\n")
+        return 1
+
+    # Parse old/new as unicode
+    old_str = _to_unicode(args.old) if args.old else u''
+    new_str = _to_unicode(args.new) if args.new is not None else u''
+
+    pyenc = _friendly_to_python(enc)
+
+    with io.open(args.file, 'r', encoding=pyenc) as f:
+        content = f.read()
+
+    count = content.count(old_str)
+    if count == 0:
+        sys.stderr.write("WARNING: pattern not found in file\n")
+        return 1
+
+    content = content.replace(old_str, new_str)
+
+    with io.open(args.file, 'w', encoding=pyenc) as f:
+        f.write(content)
+
+    print("OK: %d replacement(s), encoding '%s' preserved" % (count, enc))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # CLI entry
 # ---------------------------------------------------------------------------
@@ -296,6 +326,13 @@ def main():
     p_replace.add_argument('--stdin', action='store_true', default=False,
                            help='Read JSON patch list from stdin instead of --old/--new')
 
+    p_safe_edit = sub.add_parser('safe-edit', help='Detect encoding + replace in one step (safest option)')
+    p_safe_edit.add_argument('file', help='File path')
+    p_safe_edit.add_argument('--old', required=True, dest='old',
+                             help='String to replace')
+    p_safe_edit.add_argument('--new', required=True, dest='new',
+                             help='Replacement string')
+
     args = parser.parse_args()
 
     if args.command == 'detect':
@@ -306,6 +343,8 @@ def main():
         return cmd_write(args)
     elif args.command == 'replace':
         return cmd_replace(args)
+    elif args.command == 'safe-edit':
+        return cmd_safe_edit(args)
     else:
         parser.print_help()
         return 0
