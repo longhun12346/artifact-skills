@@ -179,5 +179,165 @@ class TestRoundTrip(unittest.TestCase):
         self._roundtrip('gbk', u'hello world: \u4f60\u597d\u4e16\u754c\n')
 
 
+# ---------------------------------------------------------------------------
+# Tests: safe-write command
+# ---------------------------------------------------------------------------
+
+class TestSafeWrite(unittest.TestCase):
+
+    def _write_file(self, raw_bytes, suffix='.cpp'):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(raw_bytes)
+        return path
+
+    def _run(self, path, stdin_text, enc_arg=None):
+        """Run cmd_safe_write with UTF-8 encoded stdin_text."""
+        raw = stdin_text.encode('utf-8')
+        saved = sys.stdin
+        try:
+            if sys.version_info[0] >= 3:
+                buf = io.BytesIO(raw)
+                text_stdin = io.TextIOWrapper(buf, encoding='utf-8')
+                text_stdin.buffer = io.BytesIO(raw)
+                sys.stdin = text_stdin
+            else:
+                import StringIO as _sio
+                sys.stdin = _sio.StringIO(raw)
+            Args = type('Args', (), {'file': path, 'encoding': enc_arg})
+            return eu.cmd_safe_write(Args())
+        finally:
+            sys.stdin = saved
+
+    def test_existing_gbk_preserved(self):
+        # Write GBK file, then safe-write with Chinese content
+        # Verify file encoding stays GBK (Chinese chars distinguish from utf-8)
+        path = self._write_file((u'\u6ce8\u91ca ' * 20).encode('gbk'))
+        try:
+            ret = self._run(path, u'\u66ff\u6362\u5185\u5bb9' * 10)  # Chinese in stdin
+            self.assertEqual(ret, 0)
+            # File should still be GBK (encoding inherited from original)
+            self.assertEqual(eu.detect_encoding(path), 'gbk')
+        finally:
+            os.unlink(path)
+
+    def test_existing_utf8_bom_preserved(self):
+        raw = b'\xef\xbb\xbf' + u'hello'.encode('utf-8')
+        path = self._write_file(raw, suffix='.nsi')
+        try:
+            ret = self._run(path, u'new content')
+            self.assertEqual(ret, 0)
+            self.assertEqual(eu.detect_encoding(path), 'utf-8-bom')
+        finally:
+            os.unlink(path)
+
+    def test_new_file_with_enc_arg(self):
+        fd, path = tempfile.mkstemp(suffix='.cpp')
+        os.close(fd)
+        os.unlink(path)
+        try:
+            ret = self._run(path, u'int x = 1;', enc_arg='utf-8')
+            self.assertEqual(ret, 0)
+            self.assertEqual(eu.detect_encoding(path), 'utf-8')
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_new_file_no_enc_fails(self):
+        fd, path = tempfile.mkstemp(suffix='.cpp')
+        os.close(fd)
+        os.unlink(path)
+        try:
+            ret = self._run(path, u'int x = 1;')
+            self.assertEqual(ret, 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_enc_arg_overrides_detection(self):
+        """--enc on existing file skips auto-detect."""
+        path = self._write_file(u'\u6ce8'.encode('gbk'))
+        try:
+            ret = self._run(path, u'// replaced', enc_arg='utf-8')
+            self.assertEqual(ret, 0)
+            self.assertEqual(eu.detect_encoding(path), 'utf-8')
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Tests: convert command
+# ---------------------------------------------------------------------------
+
+class TestConvert(unittest.TestCase):
+
+    def _write_file(self, raw_bytes, suffix='.cpp'):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(raw_bytes)
+        return path
+
+    def test_convert_gbk_to_utf8(self):
+        path = self._write_file((u'hello \u4e2d\u6587 ' * 20).encode('gbk'))
+        try:
+            Args = type('Args', (), {'file': path, 'to': 'utf-8', 'encoding': None})
+            ret = eu.cmd_convert(Args())
+            self.assertEqual(ret, 0)
+            # Verify content round-trips correctly as UTF-8
+            with io.open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.assertIn(u'\u4e2d\u6587', content)
+        finally:
+            os.unlink(path)
+
+    def test_convert_already_target_enc(self):
+        path = self._write_file(u'hello'.encode('utf-8'))
+        try:
+            Args = type('Args', (), {'file': path, 'to': 'utf-8', 'encoding': None})
+            ret = eu.cmd_convert(Args())
+            self.assertEqual(ret, 0)
+        finally:
+            os.unlink(path)
+
+    def test_convert_utf8_to_utf8_bom(self):
+        path = self._write_file(u'hello'.encode('utf-8'))
+        try:
+            Args = type('Args', (), {'file': path, 'to': 'utf-8-bom', 'encoding': None})
+            ret = eu.cmd_convert(Args())
+            self.assertEqual(ret, 0)
+            self.assertEqual(eu.detect_encoding(path), 'utf-8-bom')
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Tests: safe-edit error path
+# ---------------------------------------------------------------------------
+
+class TestSafeEditErrors(unittest.TestCase):
+
+    def test_pattern_not_found_returns_error_exit1(self):
+        fd, path = tempfile.mkstemp(suffix='.cpp')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(b'int x = 1;')
+        try:
+            saved_err = sys.stderr
+            if sys.version_info[0] >= 3:
+                sys.stderr = io.StringIO()
+            else:
+                import StringIO as _sio
+                sys.stderr = _sio.StringIO()
+            try:
+                Args = type('Args', (), {'file': path, 'old': 'NO_MATCH', 'new': 'X'})
+                ret = eu.cmd_safe_edit(Args())
+                msg = sys.stderr.getvalue()
+            finally:
+                sys.stderr = saved_err
+            self.assertEqual(ret, 1)
+            self.assertIn('ERROR', msg)
+        finally:
+            os.unlink(path)
+
+
 if __name__ == '__main__':
     unittest.main()

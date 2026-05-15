@@ -300,7 +300,7 @@ def cmd_safe_edit(args):
 
     count = content.count(old_str)
     if count == 0:
-        sys.stderr.write("WARNING: pattern not found in file\n")
+        sys.stderr.write("ERROR: pattern not found in file\n")
         return 1
 
     content = content.replace(old_str, new_str)

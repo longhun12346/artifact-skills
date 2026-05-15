@@ -47,8 +47,10 @@ def _sys_ansi_enc():
                 return 'shift-jis'
             if n in ('cp949', 'euckr', 'ksc56011987'):
                 return 'euc-kr'
-            if n in ('cp950', 'big5', 'big5hkscs'):
+            if n in ('cp950', 'big5', 'big5hkscs', 'big5hkscs'):
                 return 'big5'
+            if n in ('cp1251', 'windows1251'):
+                return 'windows-1251'
             return enc
     except Exception:
         pass
@@ -80,8 +82,10 @@ EXTENSION_DEFAULTS = {
 }
 
 # Encodings safe for Edit/Write tools (plain UTF-8 output).
+# Note: '' (detection failure) is NOT listed here — _detect() returning ''
+# is handled explicitly as fail-open in the callers below.
 SAFE_ENCODINGS = {
-    'utf-8', 'ascii', 'binary', '',
+    'utf-8', 'ascii', 'binary',
     # Windows-125x (except 1251/Cyrillic) and iso-8859-* are heuristic
     # chardet fallbacks on near-ASCII content; treat as safe to avoid
     # false-positive blocks on UTF-8 files.
@@ -146,7 +150,8 @@ _eu = None
 def _get_eu():
     global _eu
     if _eu is None:
-        sys.path.insert(0, _SCRIPT_DIR)
+        if _SCRIPT_DIR not in sys.path:
+            sys.path.append(_SCRIPT_DIR)
         import encoding_utils
         _eu = encoding_utils
     return _eu
@@ -178,17 +183,17 @@ def _infer_encoding_for_new_file(filepath):
         return 'utf-8'
 
     directory = os.path.dirname(filepath) or '.'
+    siblings = []
     try:
-        all_files = os.listdir(directory)
+        for f in os.listdir(directory):
+            if len(siblings) >= SIBLING_SAMPLE_LIMIT:
+                break
+            if os.path.splitext(f)[1].lower() == ext:
+                fp = os.path.join(directory, f)
+                if os.path.isfile(fp):
+                    siblings.append(fp)
     except OSError:
-        all_files = []
-
-    siblings = [
-        os.path.join(directory, f)
-        for f in all_files
-        if os.path.splitext(f)[1].lower() == ext
-           and os.path.isfile(os.path.join(directory, f))
-    ][:SIBLING_SAMPLE_LIMIT]
+        pass
 
     if siblings:
         counter = collections.Counter()
@@ -224,14 +229,21 @@ def _in_project(filepath):
     allowing the hook to pass them through without encoding checks.
     """
     d = os.path.dirname(os.path.abspath(filepath))
+    _scandir = getattr(os, 'scandir', None)
     while True:
         for marker in _PROJECT_MARKERS:
             if os.path.exists(os.path.join(d, marker)):
                 return True
         try:
-            for entry in os.listdir(d):
-                if os.path.splitext(entry)[1].lower() in _PROJECT_MARKER_EXTS:
-                    return True
+            if _scandir:
+                with _scandir(d) as it:
+                    for entry in it:
+                        if os.path.splitext(entry.name)[1].lower() in _PROJECT_MARKER_EXTS:
+                            return True
+            else:
+                for name in os.listdir(d):
+                    if os.path.splitext(name)[1].lower() in _PROJECT_MARKER_EXTS:
+                        return True
         except OSError:
             pass
         parent = os.path.dirname(d)
@@ -258,10 +270,7 @@ def main():
     try:
         raw = sys.stdin.read()
         data = json.loads(raw)
-    except Exception:
-        _allow()
 
-    try:
         tool_name = data.get('tool_name', '')
         tool_input = data.get('tool_input', {})
 
@@ -314,7 +323,7 @@ def main():
             )
         else:
             encoding = _detect(file_path)
-            if encoding in SAFE_ENCODINGS:
+            if not encoding or encoding in SAFE_ENCODINGS:
                 _allow()
             _block(
                 '[encoding_guard] BLOCKED: {path} (encoding: {enc})\n'

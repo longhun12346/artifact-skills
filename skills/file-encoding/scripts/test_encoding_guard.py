@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Tests for encoding_guard.py -- compatible with Python 2.6+ and 3.x.
 
 Usage:
@@ -230,6 +230,57 @@ class TestReadToolHook(unittest.TestCase):
             code, out = run_hook('Read', path)
             self.assertEqual(code, 2)
             self.assertIn('python $EU read', out)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _infer_encoding_for_new_file()
+# ---------------------------------------------------------------------------
+
+class TestInferEncodingForNewFile(unittest.TestCase):
+
+    def test_fallback_extension_default_ini(self):
+        """No siblings -> use EXTENSION_DEFAULTS (.ini -> utf-16-le-bom)."""
+        with TempProject() as root:
+            path = os.path.join(root, 'new.ini')
+            enc = eg._infer_encoding_for_new_file(path)
+            self.assertEqual(enc, 'utf-16-le-bom')
+
+    def test_fallback_extension_default_nsi(self):
+        with TempProject() as root:
+            path = os.path.join(root, 'install.nsi')
+            enc = eg._infer_encoding_for_new_file(path)
+            self.assertEqual(enc, 'utf-8-bom')
+
+    def test_sibling_gbk_inferred(self):
+        """Existing GBK siblings steer inference to gbk."""
+        with TempProject() as root:
+            for i in range(3):
+                p = os.path.join(root, 'dialog%d.rc' % i)
+                write_raw(p, b'\xd7\xd4\xc8\xcb')  # GBK bytes
+            new_path = os.path.join(root, 'new_dialog.rc')
+            enc = eg._infer_encoding_for_new_file(new_path)
+            self.assertEqual(enc, 'gbk')
+
+    def test_unknown_extension_returns_utf8(self):
+        with TempProject() as root:
+            path = os.path.join(root, 'file.unknown')
+            enc = eg._infer_encoding_for_new_file(path)
+            self.assertEqual(enc, 'utf-8')
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _detect() failure -> fail-open
+# ---------------------------------------------------------------------------
+
+class TestDetectFailOpen(unittest.TestCase):
+
+    def test_nonexistent_file_detect_returns_empty(self):
+        """_detect on non-existent path returns '' (fail-safe)."""
+        result = eg._detect('/no/such/path/file.cpp')
+        self.assertEqual(result, '')
+
+    def test_empty_path_detect_returns_empty(self):
+        self.assertEqual(eg._detect(''), '')
 
 
 # ---------------------------------------------------------------------------
