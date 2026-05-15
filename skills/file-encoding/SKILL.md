@@ -1,7 +1,7 @@
 ---
 name: file-encoding
 description: Handles multi-encoding files (ANSI/UTF-8/UTF-16 LE BOM) in Windows C++ projects. Detect encoding before editing .cpp/.h/.py/.nsi/.ini/.xml/.bat files to avoid corruption.
-version: 1.0.1
+version: 1.2.0
 author: longhun12346
 license: MIT
 tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis]
@@ -11,7 +11,12 @@ tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis]
 
 ## When to trigger
 
-**Windows + C++ project** -> detect encoding before editing any source file. Skip for non-Windows or frontend projects (everything is UTF-8).
+**With hook installed** (`encoding_guard.py` as PreToolUse): automatic — the hook detects project
+membership and file encoding, blocking unsafe Edit/Write before any file is touched. No manual
+trigger needed.
+
+**Without hook**: apply manually on **Windows + C++ projects** before editing `.cpp`/`.h`/`.rc`/
+`.bat`/`.py`/`.nsi`/`.ini` files. Skip for non-Windows or pure frontend projects (everything is UTF-8).
 
 C++ project detection: `.vcxproj` / `CMakeLists.txt` / `stdafx.h` / `#include <windows.h>` etc.
 
@@ -30,12 +35,16 @@ C++ project detection: `.vcxproj` / `CMakeLists.txt` / `stdafx.h` / `#include <w
 
 Uses `scripts/encoding_utils.py`. Supports Python 2.6+/3.x.
 
+> **Strongly recommended:** install `chardet` (`pip install chardet`). Without it, encoding detection
+> uses a heuristic fallback that can misidentify Shift-JIS / EUC-KR files as GBK on Chinese Windows.
+
 ```
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py detect <file>
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read <file> [--enc E]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write <file> --enc E
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py replace <file> --old S --new T [--enc E]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-edit <file> --old S --new T
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py convert <file> --to E [--enc F]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py --version
 ```
 
@@ -87,3 +96,42 @@ python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write "new.cpp" --enc gbk <
 - **INI without BOM** -> `GetPrivateProfileStringW` reads as ANSI, corrupting non-ASCII. Must be UTF-16 LE BOM.
 - **Python `\6` octal escape** -> in non-raw strings, `Software\kingsoft\Office\6.0` has hidden control chars. Use raw string `r'...'` or `\\\\`.
 - **Py2 `open()` no `encoding=`** -> use `io.open()`. encoding_utils.py handles this.
+
+## Hook-based enforcement (recommended)
+
+`scripts/encoding_guard.py` is a Claude Code `PreToolUse` hook that **blocks** Edit/Write at the execution
+level before any file is touched. More reliable than prompt-only instructions.
+
+### What it does
+
+- **Existing files**: detects encoding; blocks if non-UTF-8, prints `safe-edit` / `read-write` command.
+- **New files**: scans sibling files of same extension to infer project convention; blocks if expected
+  encoding is non-UTF-8, prints `write --enc` command. Falls back to per-extension defaults when no
+  siblings exist.
+- **Project scope**: only monitors files inside a recognised project root (`.git` / `.svn` / `.hg` / `CMakeLists.txt` / `*.vcxproj` / `*.sln` / `setup.py` / `pyproject.toml`); files in temp dirs or outside any project pass through.
+- **Scope filter**: only fires on extensions in `MONITORED_EXTENSIONS`; all other files pass through.
+- **Fail-open**: any script error → exit 0 (allow), never blocks unrelated edits.
+
+### Installation
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ${CLAUDE_SKILL_DIR}/scripts/encoding_guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+On Windows, replace `python` with the full Python path if needed (e.g. `C:\\Python39\\python.exe`).

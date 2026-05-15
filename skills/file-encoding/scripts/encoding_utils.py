@@ -9,13 +9,16 @@ Usage:
                                                    # detect encoding, str.replace, write back
   python encoding_utils.py replace <file> --stdin  # read JSON patches from stdin
                                                    # JSON: [{"old":"a","new":"b"}, ...]
+  python encoding_utils.py convert <file> --to E         # convert encoding in-place
+  python encoding_utils.py convert <file> --to E [--enc F]  # with explicit source encoding
   python encoding_utils.py --version               # print version
 
 Supported encoding names (friendly -> Python):
-  gbk, shift-jis, euc-kr, big5, utf-8, utf-8-bom, utf-16-le-bom, utf-16
+  gbk, shift-jis, euc-kr, big5, utf-8, utf-8-bom, utf-16-le-bom, utf-16,
+  windows-1250 ~ windows-1258, iso-8859-1, iso-8859-2
 """
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 import argparse
 import json
@@ -55,6 +58,7 @@ def _to_unicode(s):
 # ---------------------------------------------------------------------------
 
 _BINARY_NULL_THRESHOLD = 512  # check first 512 bytes for null bytes
+_MAX_DETECT_BYTES = 8192     # read at most 8 KB for encoding detection
 
 
 def _is_binary(raw):
@@ -93,7 +97,7 @@ _CODE_PAGE_MAP = {
 def detect_encoding(filepath):
     """Detect text file encoding. Returns friendly name, or 'binary'."""
     with open(filepath, 'rb') as f:
-        raw = f.read()
+        raw = f.read(_MAX_DETECT_BYTES)
 
     # BOM check first - a file with BOM is text by definition,
     # even if it contains null bytes (e.g. UTF-16 LE of ASCII text)
@@ -123,16 +127,18 @@ def detect_encoding(filepath):
 
     # Heuristic: try system ANSI code page first, then common encodings
     sys_enc = _get_sys_encoding()
-    candidates = []
-    if sys_enc and sys_enc not in ('utf-8', 'ascii'):
-        candidates.append(sys_enc)
-    # On Windows, try known ANSI code pages; on Unix, try CJK + common 8-bit
     if _IS_WINDOWS:
-        candidates.extend(['gbk', 'shift-jis', 'euc-kr', 'big5',
-                           'windows-1252', 'windows-1251', 'windows-1250'])
+        fallbacks = ['gbk', 'shift-jis', 'euc-kr', 'big5',
+                     'windows-1252', 'windows-1251', 'windows-1250']
     else:
-        candidates.extend(['gbk', 'shift-jis', 'euc-kr', 'big5',
-                           'iso-8859-1', 'windows-1252'])
+        fallbacks = ['gbk', 'shift-jis', 'euc-kr', 'big5',
+                     'iso-8859-1', 'windows-1252']
+    seen = set()
+    candidates = []
+    for enc in ([sys_enc] if sys_enc and sys_enc not in ('utf-8', 'ascii') else []) + fallbacks:
+        if enc not in seen:
+            seen.add(enc)
+            candidates.append(enc)
     for enc in candidates:
         try:
             raw.decode(enc)
@@ -247,7 +253,7 @@ def cmd_replace(args):
             return 1
         patches = [{"old": _to_unicode(args.old), "new": _to_unicode(args.new)}]
 
-    with io.open(args.file, 'r', encoding=pyenc) as f:
+    with io.open(args.file, 'r', encoding=pyenc, newline='') as f:
         content = f.read()
 
     count_total = 0
@@ -256,7 +262,7 @@ def cmd_replace(args):
         content = content.replace(p['old'], p['new'])
         count_total += n
 
-    with io.open(args.file, 'w', encoding=pyenc) as f:
+    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:
         f.write(content)
 
     print("OK: %d replacement(s) total, encoding %s preserved" % (count_total, enc))
@@ -276,7 +282,7 @@ def cmd_safe_edit(args):
 
     pyenc = _friendly_to_python(enc)
 
-    with io.open(args.file, 'r', encoding=pyenc) as f:
+    with io.open(args.file, 'r', encoding=pyenc, newline='') as f:
         content = f.read()
 
     count = content.count(old_str)
@@ -286,10 +292,32 @@ def cmd_safe_edit(args):
 
     content = content.replace(old_str, new_str)
 
-    with io.open(args.file, 'w', encoding=pyenc) as f:
+    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:
         f.write(content)
 
     print("OK: %d replacement(s), encoding '%s' preserved" % (count, enc))
+    return 0
+
+
+def cmd_convert(args):
+    """Convert a file from its current encoding to a different encoding in-place."""
+    enc = args.encoding or detect_encoding(args.file)
+    if enc == 'binary':
+        sys.stderr.write("ERROR: cannot convert binary file\n")
+        return 1
+    if enc == args.to:
+        print("OK: already %s, no conversion needed" % enc)
+        return 0
+    pyenc_from = _friendly_to_python(enc)
+    pyenc_to = _friendly_to_python(args.to)
+
+    with io.open(args.file, 'r', encoding=pyenc_from, newline='') as f:
+        content = f.read()
+
+    with io.open(args.file, 'w', encoding=pyenc_to, newline='') as f:
+        f.write(content)
+
+    print("OK: converted %s -> %s" % (enc, args.to))
     return 0
 
 
@@ -333,6 +361,13 @@ def main():
     p_safe_edit.add_argument('--new', required=True, dest='new',
                              help='Replacement string')
 
+    p_convert = sub.add_parser('convert', help='Convert file to a different encoding in-place')
+    p_convert.add_argument('file', help='File path')
+    p_convert.add_argument('--to', required=True, dest='to',
+                           help='Target encoding (e.g. utf-8, gbk, utf-8-bom)')
+    p_convert.add_argument('--encoding', '--enc', default=None, dest='encoding',
+                           help='Source encoding override (default: auto-detect)')
+
     args = parser.parse_args()
 
     if args.command == 'detect':
@@ -345,6 +380,8 @@ def main():
         return cmd_replace(args)
     elif args.command == 'safe-edit':
         return cmd_safe_edit(args)
+    elif args.command == 'convert':
+        return cmd_convert(args)
     else:
         parser.print_help()
         return 0
