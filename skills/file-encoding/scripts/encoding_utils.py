@@ -9,6 +9,8 @@ Usage:
                                                    # detect encoding, str.replace, write back
   python encoding_utils.py replace <file> --stdin  # read JSON patches from stdin
                                                    # JSON: [{"old":"a","new":"b"}, ...]
+  python encoding_utils.py safe-write <file>       # read stdin, auto-detect encoding, write back
+  python encoding_utils.py safe-write <file> --enc E  # new file: write stdin with encoding E
   python encoding_utils.py convert <file> --to E         # convert encoding in-place
   python encoding_utils.py convert <file> --to E [--enc F]  # with explicit source encoding
   python encoding_utils.py --version               # print version
@@ -18,7 +20,7 @@ Supported encoding names (friendly -> Python):
   windows-1250 ~ windows-1258, iso-8859-1, iso-8859-2
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 import argparse
 import json
@@ -299,6 +301,37 @@ def cmd_safe_edit(args):
     return 0
 
 
+def cmd_safe_write(args):
+    """Auto-detect existing file encoding + write stdin content, preserving encoding.
+    For new files (not yet existing), --enc is required."""
+    if os.path.exists(args.file) and os.path.getsize(args.file) >= 2:
+        enc = detect_encoding(args.file)
+        if enc == 'binary':
+            sys.stderr.write("ERROR: cannot overwrite binary file\n")
+            return 1
+    else:
+        if not args.encoding:
+            sys.stderr.write("ERROR: file does not exist or is empty; --enc required\n")
+            return 1
+        enc = args.encoding
+
+    pyenc = _friendly_to_python(enc)
+
+    # Read stdin as raw bytes then decode as UTF-8, so non-ASCII survives on all platforms
+    if _IS_PY2:
+        raw_stdin = sys.stdin.read()
+        content = raw_stdin.decode('utf-8') if isinstance(raw_stdin, bytes) else raw_stdin
+    else:
+        raw_stdin = sys.stdin.buffer.read()
+        content = raw_stdin.decode('utf-8')
+
+    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:
+        f.write(content)
+
+    print("OK: written, encoding '%s' preserved" % enc)
+    return 0
+
+
 def cmd_convert(args):
     """Convert a file from its current encoding to a different encoding in-place."""
     enc = args.encoding or detect_encoding(args.file)
@@ -361,6 +394,11 @@ def main():
     p_safe_edit.add_argument('--new', required=True, dest='new',
                              help='Replacement string')
 
+    p_safe_write = sub.add_parser('safe-write', help='Auto-detect encoding + full file rewrite from stdin')
+    p_safe_write.add_argument('file', help='File path')
+    p_safe_write.add_argument('--encoding', '--enc', default=None, dest='encoding',
+                              help='Encoding for new files (required if file does not exist)')
+
     p_convert = sub.add_parser('convert', help='Convert file to a different encoding in-place')
     p_convert.add_argument('file', help='File path')
     p_convert.add_argument('--to', required=True, dest='to',
@@ -380,6 +418,8 @@ def main():
         return cmd_replace(args)
     elif args.command == 'safe-edit':
         return cmd_safe_edit(args)
+    elif args.command == 'safe-write':
+        return cmd_safe_write(args)
     elif args.command == 'convert':
         return cmd_convert(args)
     else:

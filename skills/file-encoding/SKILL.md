@@ -1,7 +1,7 @@
 ---
 name: file-encoding
 description: Handles multi-encoding files (ANSI/UTF-8/UTF-16 LE BOM) in Windows C++ projects. Detect encoding before editing .cpp/.h/.rc/.nsi/.ini/.xml/.bat files to avoid corruption.
-version: 1.3.0
+version: 1.4.0
 author: longhun12346
 license: MIT
 tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis]
@@ -43,6 +43,7 @@ python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read <file> [--enc E]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write <file> --enc E
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py replace <file> --old S --new T [--enc E]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-edit <file> --old S --new T
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write <file> [--enc E]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py convert <file> --to E [--enc F]
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py --version
 ```
@@ -63,16 +64,15 @@ detect -> other (GBK...) -> safe-edit or replace
 **`utf-8-bom` is NOT `utf-8`.** The BOM makes them different. Edit/Write tools treat `utf-8-bom` as plain UTF-8 and may strip or corrupt the BOM. NSI/Python build scripts depend on BOM — if stripped, NSIS/MSVC reads garbled text.
 
 ```bash
-# Preferred: safe-edit (auto-detect + replace, one command, safe for ALL encodings)
+# Partial edit: safe-edit (auto-detect + replace, one command, safe for ALL encodings)
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-edit "file.cpp" --old "old" --new "new"
+
+# Full file rewrite: safe-write (auto-detect + overwrite from stdin)
+# NEVER use raw Python open()/write() for non-UTF-8 files — use safe-write instead
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write "file.ini" < new_content.txt
 
 # Explicit replace (same safety, allows --enc override)
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py replace "file.cpp" --old "old" --new "new"
-
-# Complex edit (multi-spot changes)
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read "file.cpp" > tmp.txt
-# ... edit tmp.txt with any UTF-8 editor ...
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write "file.cpp" --enc gbk < tmp.txt
 
 # utf-8 (no BOM) only: Edit tool shortcuts are fine
 # e.g. Edit("file.xml", old, new) or Write("file.xml", content) — XML files are UTF-8
@@ -84,7 +84,7 @@ python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write "file.cpp" --enc gbk 
 
 ```bash
 python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py detect "existing.cpp"
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write "new.cpp" --enc gbk < content.txt
+echo "content" | python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write "new.cpp" --enc gbk
 ```
 
 ## Pitfalls
@@ -95,6 +95,7 @@ python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write "new.cpp" --enc gbk <
 - **INI without BOM** -> `GetPrivateProfileStringW` reads as ANSI, corrupting non-ASCII. Must be UTF-16 LE BOM.
 - **Python `\6` octal escape** -> in non-raw strings, `Software\kingsoft\Office\6.0` has hidden control chars. Use raw string `r'...'` or `\\\\`.
 - **Py2 `open()` no `encoding=`** -> use `io.open()`. encoding_utils.py handles this.
+- **Raw Python for full rewrite** -> NEVER use `open(f,'wb').write(b'\xff\xfe' + content.encode('utf-16-le'))` — use `safe-write` instead. It auto-detects encoding, no manual BOM handling needed.
 
 ## Hook-based enforcement (recommended)
 
