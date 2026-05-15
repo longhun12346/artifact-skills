@@ -55,6 +55,21 @@ def _to_unicode(s):
     return s
 
 
+def _read_stdin_unicode(binary_mode=False):
+    """Read stdin and return a unicode string.
+
+    binary_mode=True: read via sys.stdin.buffer (Py3) so non-ASCII survives
+    on Windows regardless of console code page. Use for raw file content.
+    binary_mode=False: read via sys.stdin in text mode. Use for JSON/metadata.
+    """
+    if _IS_PY2:
+        raw = sys.stdin.read()
+        return raw.decode('utf-8') if isinstance(raw, bytes) else raw
+    if binary_mode:
+        return sys.stdin.buffer.read().decode('utf-8')
+    return sys.stdin.read()
+
+
 # ---------------------------------------------------------------------------
 # Encoding helpers
 # ---------------------------------------------------------------------------
@@ -226,9 +241,7 @@ def cmd_write(args):
         return 1
 
     pyenc = _friendly_to_python(args.encoding)
-    content = sys.stdin.read()
-    if _IS_PY2 and isinstance(content, bytes):
-        content = content.decode('utf-8')
+    content = _read_stdin_unicode()
 
     with io.open(args.file, 'w', encoding=pyenc) as f:
         f.write(content)
@@ -245,9 +258,7 @@ def cmd_replace(args):
     pyenc = _friendly_to_python(enc)
 
     if args.stdin:
-        raw_json = sys.stdin.read()
-        if _IS_PY2 and isinstance(raw_json, bytes):
-            raw_json = raw_json.decode('utf-8')
+        raw_json = _read_stdin_unicode()
         patches = json.loads(raw_json)
     else:
         if not args.old or args.new is None:
@@ -303,29 +314,25 @@ def cmd_safe_edit(args):
 
 def cmd_safe_write(args):
     """Auto-detect existing file encoding + write stdin content, preserving encoding.
-    For new files (not yet existing), --enc is required."""
-    if os.path.exists(args.file) and os.path.getsize(args.file) >= 2:
+    For new files (not yet existing), --enc is required.
+    If --enc is supplied and file exists, it overrides auto-detection."""
+    if args.encoding:
+        enc = args.encoding
+    elif os.path.exists(args.file):
         enc = detect_encoding(args.file)
         if enc == 'binary':
             sys.stderr.write("ERROR: cannot overwrite binary file\n")
             return 1
     else:
-        if not args.encoding:
-            sys.stderr.write("ERROR: file does not exist or is empty; --enc required\n")
-            return 1
-        enc = args.encoding
+        sys.stderr.write("ERROR: file does not exist; --enc required\n")
+        return 1
 
     pyenc = _friendly_to_python(enc)
 
-    # Read stdin as raw bytes then decode as UTF-8, so non-ASCII survives on all platforms
-    if _IS_PY2:
-        raw_stdin = sys.stdin.read()
-        content = raw_stdin.decode('utf-8') if isinstance(raw_stdin, bytes) else raw_stdin
-    else:
-        raw_stdin = sys.stdin.buffer.read()
-        content = raw_stdin.decode('utf-8')
+    # Read stdin via buffer so non-ASCII survives Windows console code page
+    content = _read_stdin_unicode(binary_mode=True)
 
-    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:
+    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:  # newline='' preserves \r\n
         f.write(content)
 
     print("OK: written, encoding '%s' preserved" % enc)
