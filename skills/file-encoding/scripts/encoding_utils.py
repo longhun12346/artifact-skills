@@ -18,7 +18,7 @@ Supported encoding names (friendly -> Python):
   windows-1250 ~ windows-1258, iso-8859-1, iso-8859-2
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 import argparse
 import json

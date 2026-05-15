@@ -1,7 +1,7 @@
 ---
 name: file-encoding
 description: Handles multi-encoding files (ANSI/UTF-8/UTF-16 LE BOM) in Windows C++ projects. Detect encoding before editing .cpp/.h/.rc/.nsi/.ini/.xml/.bat files to avoid corruption.
-version: 1.2.0
+version: 1.3.0
 author: longhun12346
 license: MIT
 tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis]
