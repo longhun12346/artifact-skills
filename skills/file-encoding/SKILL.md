@@ -1,6 +1,6 @@
 ---
 name: file-encoding
-description: Handles multi-encoding files (ANSI/UTF-8/UTF-16 LE BOM) in Windows C++ projects. Detect encoding before editing .cpp/.h/.py/.nsi/.ini/.xml/.bat files to avoid corruption.
+description: Handles multi-encoding files (ANSI/UTF-8/UTF-16 LE BOM) in Windows C++ projects. Detect encoding before editing .cpp/.h/.rc/.nsi/.ini/.xml/.bat files to avoid corruption.
 version: 1.2.0
 author: longhun12346
 license: MIT
@@ -16,7 +16,7 @@ membership and file encoding, blocking unsafe Edit/Write before any file is touc
 trigger needed.
 
 **Without hook**: apply manually on **Windows + C++ projects** before editing `.cpp`/`.h`/`.rc`/
-`.bat`/`.py`/`.nsi`/`.ini` files. Skip for non-Windows or pure frontend projects (everything is UTF-8).
+`.bat`/`.nsi`/`.ini` files. Skip for non-Windows or pure frontend projects (everything is UTF-8).
 
 C++ project detection: `.vcxproj` / `CMakeLists.txt` / `stdafx.h` / `#include <windows.h>` etc.
 
@@ -28,7 +28,6 @@ C++ project detection: `.vcxproj` / `CMakeLists.txt` / `stdafx.h` / `#include <w
 | `.bat` (build scripts) | **System ANSI** | CMD reads as ANSI; UTF-8 without BOM garbles non-ASCII |
 | `.nsi` | UTF-8 BOM or UTF-16 LE BOM | Never assume, always `detect` |
 | `.ini` (GetPrivateProfileStringW) | **UTF-16 LE BOM** | Non-ASCII garbled without BOM |
-| `.py` (build scripts) | UTF-8 BOM | |
 | `.xml` | UTF-8 | |
 
 ## Commands
@@ -121,7 +120,7 @@ Add to `~/.claude/settings.json`:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|Read",
         "hooks": [
           {
             "type": "command",

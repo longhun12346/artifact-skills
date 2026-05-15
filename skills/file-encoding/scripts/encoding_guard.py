@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """encoding_guard.py - PreToolUse hook for Claude Code.
 
-Intercepts Edit/Write tool calls and blocks them when the target file has
-a non-UTF-8 encoding (or when a new file of a monitored extension should
-inherit the project's existing encoding convention).
+Intercepts Edit/Write/Read tool calls on monitored file extensions inside
+recognised project roots:
+
+- Edit/Write: blocked when the target file has a non-UTF-8 encoding, or
+  when a new file should inherit the project's existing encoding convention.
+- Read: blocked when the file encoding would produce garbled output in the
+  Read tool (UTF-16 variants always; ANSI encodings such as GBK/Shift-JIS
+  when the file actually contains non-ASCII bytes).
 
 Exit codes:
   0 - allow tool call to proceed
@@ -54,7 +59,7 @@ _SYS_ANSI = _sys_ansi_enc()
 
 MONITORED_EXTENSIONS = {
     '.cpp', '.h', '.hpp', '.c', '.cc', '.cxx',
-    '.rc', '.bat', '.nsi', '.ini', '.py', '.xml',
+    '.rc', '.bat', '.nsi', '.ini', '.xml',
 }
 
 # Default encoding per extension when sibling inference produces no result.
@@ -71,7 +76,6 @@ EXTENSION_DEFAULTS = {
     '.bat':  _SYS_ANSI,
     '.nsi':  'utf-8-bom',
     '.ini':  'utf-16-le-bom',
-    '.py':   'utf-8-bom',
     '.xml':  'utf-8',
 }
 
@@ -97,6 +101,22 @@ STRONG_NONASCII_ENCODINGS = {
 }
 
 SIBLING_SAMPLE_LIMIT = 5
+
+# Encodings where the Read tool produces completely garbled output.
+# UTF-16 encodes every character as 2 bytes; a UTF-8 reader sees null bytes
+# between every ASCII character and cannot display the content meaningfully.
+READ_ALWAYS_BLOCK = frozenset([
+    'utf-16-le-bom', 'utf-16-be-bom', 'utf-16-le', 'utf-16-be', 'utf-16',
+])
+
+# ANSI encodings where non-ASCII bytes will be misinterpreted as UTF-8
+# sequences.  Only block Read when the file actually has non-ASCII content
+# (pure-ASCII ANSI files are displayed correctly by the Read tool).
+READ_ANSI_CHECK = frozenset([
+    'gbk', 'gb2312', 'gb18030',
+    'shift-jis', 'euc-kr', 'big5',
+    'windows-1251',
+])
 
 # Project root markers: any of these found while walking up → "in a project".
 # List (not frozenset) so .git is checked first — it covers the vast majority of projects
@@ -220,6 +240,16 @@ def _in_project(filepath):
         d = parent
 
 
+def _has_nonascii(filepath):
+    """Return True if the first 512 bytes of filepath contain any byte >= 0x80."""
+    try:
+        with open(filepath, 'rb') as f:
+            chunk = f.read(512)
+        return any(b >= 0x80 for b in bytearray(chunk))
+    except Exception:
+        return True  # fail-safe: assume non-ASCII
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -235,7 +265,7 @@ def main():
         tool_name = data.get('tool_name', '')
         tool_input = data.get('tool_input', {})
 
-        if tool_name not in ('Edit', 'Write'):
+        if tool_name not in ('Edit', 'Write', 'Read'):
             _allow()
 
         file_path = tool_input.get('file_path', '')
@@ -247,6 +277,27 @@ def main():
             _allow()
 
         if not _in_project(file_path):
+            _allow()
+
+        if tool_name == 'Read':
+            if os.path.exists(file_path):
+                enc = _detect(file_path)
+                if enc in READ_ALWAYS_BLOCK:
+                    _block(
+                        '[encoding_guard] BLOCKED: Read cannot display {path} (encoding: {enc})\n'
+                        '$EU = {utils}\n'
+                        '  python $EU read "{path}"'.format(
+                            path=file_path, enc=enc, utils=_ENCODING_UTILS,
+                        )
+                    )
+                if enc in READ_ANSI_CHECK and _has_nonascii(file_path):
+                    _block(
+                        '[encoding_guard] BLOCKED: Read will garble non-ASCII content in {path} (encoding: {enc})\n'
+                        '$EU = {utils}\n'
+                        '  python $EU read "{path}"'.format(
+                            path=file_path, enc=enc, utils=_ENCODING_UTILS,
+                        )
+                    )
             _allow()
 
         if not os.path.exists(file_path):

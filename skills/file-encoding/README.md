@@ -120,7 +120,6 @@ python scripts/encoding_utils.py write new.cpp --enc gbk < content.txt
 - Editing `.bat` build scripts (CMD reads as ANSI, UTF-8 garbles non-ASCII)
 - Editing NSIS `.nsi` installer scripts (UTF-8 BOM or UTF-16 LE BOM)
 - Editing `.ini` files read by `GetPrivateProfileStringW` (must be UTF-16 LE BOM)
-- Editing Python build scripts with BOM-sensitive toolchains
 - Converting legacy ANSI project files to UTF-8 (`convert --to utf-8`)
 
 ## Troubleshooting
