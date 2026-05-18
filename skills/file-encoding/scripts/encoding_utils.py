@@ -132,7 +132,18 @@ def detect_encoding(filepath):
     except UnicodeDecodeError:
         pass
 
-    # No BOM, not binary, not pure ASCII - try chardet, then heuristic
+    # No BOM, not binary, not pure ASCII - try UTF-8 first (strict),
+    # then chardet, then heuristic ANSI fallback.
+    # UTF-8 check must come before chardet/heuristic: single-byte ANSI encodings
+    # (e.g. windows-1251) accept almost any byte sequence, so they would win the
+    # heuristic race even when the file is valid UTF-8.
+    try:
+        raw.decode('utf-8')
+        return 'utf-8'
+    except UnicodeDecodeError:
+        pass
+
+    # Try chardet, then heuristic
     try:
         import chardet
         result = chardet.detect(raw)
