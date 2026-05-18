@@ -226,7 +226,8 @@ class TestReadToolHook(unittest.TestCase):
             subdir = os.path.join(root, 'src', 'ui')
             os.makedirs(subdir)
             path = os.path.join(subdir, 'main.cpp')
-            write_raw(path, u'// \u4e3b\u7a97\u53e3\n'.encode('gbk'))
+            # Use enough Chinese content so chardet confidently detects GBK
+            write_raw(path, (u'// \u4e3b\u7a97\u53e3\u7a97\u53e3\u6807\u9898\n' * 10).encode('gbk'))
             code, out = run_hook('Read', path)
             self.assertEqual(code, 2)
             self.assertIn('python $EU read', out)

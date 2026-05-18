@@ -99,9 +99,9 @@ def _detect_bom(raw_head):
 _CODE_PAGE_MAP = {
     # CJK
     'cp936': 'gbk', 'gb2312': 'gbk', 'gb18030': 'gbk',
-    'cp932': 'shift-jis',
+    'cp932': 'shift-jis', 'shift_jis': 'shift-jis',
     'cp949': 'euc-kr', 'euc_kr': 'euc-kr', 'ks_c_5601-1987': 'euc-kr',
-    'cp950': 'big5', 'big5-hkscs': 'big5',
+    'cp950': 'big5', 'big5-hkscs': 'big5', 'euc-tw': 'big5',
     # European
     'cp1250': 'windows-1250', 'cp1251': 'windows-1251', 'cp1252': 'windows-1252',
     'cp1253': 'windows-1253', 'cp1254': 'windows-1254', 'cp1255': 'windows-1255',

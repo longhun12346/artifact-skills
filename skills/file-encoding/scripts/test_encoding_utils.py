@@ -210,11 +210,11 @@ class TestSafeWrite(unittest.TestCase):
             sys.stdin = saved
 
     def test_existing_gbk_preserved(self):
-        # Write GBK file, then safe-write with Chinese content
-        # Verify file encoding stays GBK (Chinese chars distinguish from utf-8)
-        path = self._write_file((u'\u6ce8\u91ca ' * 20).encode('gbk'))
+        # Use content that chardet reliably identifies as GB2312/GBK (not EUC-TW)
+        gbk_content = u'\u6ce8\u91ca\u4e2d\u6587\u6587\u4ef6\u5904\u7406' * 10
+        path = self._write_file(gbk_content.encode('gbk'))
         try:
-            ret = self._run(path, u'\u66ff\u6362\u5185\u5bb9' * 10)  # Chinese in stdin
+            ret = self._run(path, gbk_content)
             self.assertEqual(ret, 0)
             # File should still be GBK (encoding inherited from original)
             self.assertEqual(eu.detect_encoding(path), 'gbk')
