@@ -197,10 +197,11 @@ class TestSafeWrite(unittest.TestCase):
         saved = sys.stdin
         try:
             if sys.version_info[0] >= 3:
-                buf = io.BytesIO(raw)
-                text_stdin = io.TextIOWrapper(buf, encoding='utf-8')
-                text_stdin.buffer = io.BytesIO(raw)
-                sys.stdin = text_stdin
+                # cmd_safe_write reads sys.stdin.buffer.read() on Py3
+                class _FakeStdin(object):
+                    def __init__(self, data):
+                        self.buffer = io.BytesIO(data)
+                sys.stdin = _FakeStdin(raw)
             else:
                 import StringIO as _sio
                 sys.stdin = _sio.StringIO(raw)
@@ -338,6 +339,97 @@ class TestSafeEditErrors(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_empty_old_pattern_rejected(self):
+        """Empty --old must be rejected without touching the file (Bug: '' corrupts file)."""
+        original = b'int x = 1;'
+        fd, path = tempfile.mkstemp(suffix='.cpp')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(original)
+        try:
+            saved_err = sys.stderr
+            sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
+            try:
+                Args = type('Args', (), {'file': path, 'old': '', 'new': 'X'})
+                ret = eu.cmd_safe_edit(Args())
+                msg = sys.stderr.getvalue()
+            finally:
+                sys.stderr = saved_err
+            self.assertEqual(ret, 1)
+            self.assertIn('ERROR', msg)
+            # File must be unchanged
+            with open(path, 'rb') as f:
+                self.assertEqual(f.read(), original)
+        finally:
+            os.unlink(path)
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_empty_old_none_pattern_rejected(self):
+        """None --old must also be rejected."""
+        fd, path = tempfile.mkstemp(suffix='.cpp')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(b'int x = 1;')
+        try:
+            saved_err = sys.stderr
+            sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
+            try:
+                Args = type('Args', (), {'file': path, 'old': None, 'new': 'X'})
+                ret = eu.cmd_safe_edit(Args())
+            finally:
+                sys.stderr = saved_err
+            self.assertEqual(ret, 1)
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Tests: cmd_write batch-patch error path
+# ---------------------------------------------------------------------------
+
+class TestWriteBatchPatch(unittest.TestCase):
+
+    def _make_file(self, content_bytes, suffix='.cpp'):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(content_bytes)
+        return path
+
+    def _run_write_batch(self, path, patches_json):
+        """Run cmd_replace in batch-patch mode (--stdin) with patches_json as stdin."""
+        saved = sys.stdin
+        try:
+            if sys.version_info[0] >= 3:
+                sys.stdin = io.StringIO(patches_json)
+            else:
+                sys.stdin = __import__('StringIO').StringIO(patches_json)
+            Args = type('Args', (), {'file': path, 'encoding': None, 'old': None, 'new': None, 'stdin': True})
+            return eu.cmd_replace(Args())
+        finally:
+            sys.stdin = saved
+
+    def test_batch_no_match_returns_error(self):
+        """batch-patch where no pattern matches must return exit 1 (Bug: was silently exit 0)."""
+        path = self._make_file(b'int x = 1;')
+        try:
+            saved_err = sys.stderr
+            sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
+            try:
+                ret = self._run_write_batch(path, '[{"old": "NO_MATCH", "new": "Y"}]')
+                msg = sys.stderr.getvalue()
+            finally:
+                sys.stderr = saved_err
+            self.assertEqual(ret, 1)
+            self.assertIn('ERROR', msg)
+        finally:
+            os.unlink(path)
+
+    def test_batch_partial_match_still_succeeds(self):
+        """batch-patch where at least one pattern matches must succeed (count_total > 0)."""
+        path = self._make_file(b'int x = 1; int y = 2;')
+        try:
+            ret = self._run_write_batch(path,
+                '[{"old": "int x = 1;", "new": "int x = 10;"}, '
+                '{"old": "NO_MATCH", "new": "Z"}]')
+            self.assertEqual(ret, 0)
+            with open(path, 'rb') as f:
+                self.assertIn(b'int x = 10;', f.read())
+        finally:
+            os.unlink(path)

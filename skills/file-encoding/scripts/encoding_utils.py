@@ -20,7 +20,7 @@ Supported encoding names (friendly -> Python):
   windows-1250 ~ windows-1258, iso-8859-1, iso-8859-2
 """
 
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 import argparse
 import json
@@ -282,15 +282,38 @@ def cmd_replace(args):
 
     count_total = 0
     for p in patches:
-        n = content.count(p['old'])
-        content = content.replace(p['old'], p['new'])
+        old = _normalize_pattern(_to_unicode(p['old']), content)
+        n = content.count(old)
+        content = content.replace(old, _to_unicode(p['new']))
         count_total += n
+
+    if count_total == 0:
+        sys.stderr.write("ERROR: no patterns matched in file\n")
+        return 1
 
     with io.open(args.file, 'w', encoding=pyenc, newline='') as f:
         f.write(content)
 
     print("OK: %d replacement(s) total, encoding %s preserved" % (count_total, enc))
     return 0
+
+
+def _normalize_pattern(old_str, content):
+    """Return the variant of old_str that matches the file's actual line endings.
+
+    When the caller passes a pattern with bare LF ('\\n') but the file uses CRLF
+    ('\\r\\n'), the literal match fails.  This function retries with CRLF so that
+    callers never have to think about line endings.
+
+    Returns the matching variant of old_str, or the original if neither matches.
+    """
+    if old_str in content:
+        return old_str
+    # Try promoting bare LF -> CRLF in the pattern
+    crlf_variant = old_str.replace(u'\r\n', u'\n').replace(u'\n', u'\r\n')
+    if crlf_variant in content:
+        return crlf_variant
+    return old_str  # caller will handle "not found"
 
 
 def cmd_safe_edit(args):
@@ -304,11 +327,16 @@ def cmd_safe_edit(args):
     old_str = _to_unicode(args.old) if args.old else u''
     new_str = _to_unicode(args.new) if args.new is not None else u''
 
+    if not old_str:
+        sys.stderr.write("ERROR: --old pattern must not be empty\n")
+        return 1
+
     pyenc = _friendly_to_python(enc)
 
     with io.open(args.file, 'r', encoding=pyenc, newline='') as f:
         content = f.read()
 
+    old_str = _normalize_pattern(old_str, content)
     count = content.count(old_str)
     if count == 0:
         sys.stderr.write("ERROR: pattern not found in file\n")
