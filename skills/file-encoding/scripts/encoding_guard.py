@@ -310,8 +310,17 @@ def main():
             _allow()
 
         if not os.path.exists(file_path):
-            # New file: always allow. Only block edits to existing files.
-            _allow()
+            expected = _infer_encoding_for_new_file(file_path)
+            if expected in SAFE_ENCODINGS:
+                _allow()
+            _block(
+                '[encoding_guard] BLOCKED: new file {path}\n'
+                'Expected encoding: {enc}\n'
+                '$EU = {utils}\n'
+                '  python $EU write "{path}" --enc {enc} < content.txt'.format(
+                    path=file_path, ext=ext, enc=expected, utils=_ENCODING_UTILS,
+                )
+            )
         else:
             encoding = _detect(file_path)
             if not encoding or encoding in SAFE_ENCODINGS:
