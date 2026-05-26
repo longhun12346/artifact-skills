@@ -20,7 +20,6 @@ Claude Code hook stdout: message shown to Claude when blocked
 
 from __future__ import print_function
 
-import collections
 import json
 import locale
 import os
@@ -94,18 +93,6 @@ SAFE_ENCODINGS = {
     'iso-8859-1', 'iso-8859-2',
 }
 
-# Encodings considered "strong evidence" of a non-UTF-8 project convention.
-# Windows-1252 / iso-8859-* are excluded: they are heuristic fallbacks that
-# fire on ASCII-only or near-ASCII UTF-8 files, not real project encoding.
-STRONG_NONASCII_ENCODINGS = {
-    'gbk', 'gb2312', 'gb18030',
-    'shift-jis', 'euc-kr', 'big5',
-    'utf-8-bom', 'utf-16-le-bom', 'utf-16-be-bom', 'utf-16',
-    'windows-1251',  # Cyrillic — deliberate; 1252 excluded (too ambiguous)
-}
-
-SIBLING_SAMPLE_LIMIT = 5
-
 # Encodings where the Read tool produces completely garbled output.
 # UTF-16 encodes every character as 2 bytes; a UTF-8 reader sees null bytes
 # between every ASCII character and cannot display the content meaningfully.
@@ -163,48 +150,6 @@ def _detect(filepath):
         return _get_eu().detect_encoding(filepath)
     except Exception:
         return ''
-
-
-def _infer_encoding_for_new_file(filepath):
-    """Infer expected encoding for a new (not-yet-existing) file.
-
-    Strategy:
-    1. Scan siblings with same extension; count only STRONG_NONASCII_ENCODINGS.
-    2. If dominant strong encoding found, return it.
-    3. Otherwise fall back to EXTENSION_DEFAULTS.
-    4. If extension not in EXTENSION_DEFAULTS, return 'utf-8'.
-
-    'windows-1252' and 'iso-8859-*' are intentionally excluded from strong
-    evidence — they are heuristic fallbacks on ASCII content, not real project
-    encoding conventions.
-    """
-    ext = os.path.splitext(filepath)[1].lower()
-    if ext not in MONITORED_EXTENSIONS:
-        return 'utf-8'
-
-    directory = os.path.dirname(filepath) or '.'
-    siblings = []
-    try:
-        for f in os.listdir(directory):
-            if len(siblings) >= SIBLING_SAMPLE_LIMIT:
-                break
-            if os.path.splitext(f)[1].lower() == ext:
-                fp = os.path.join(directory, f)
-                if os.path.isfile(fp):
-                    siblings.append(fp)
-    except OSError:
-        pass
-
-    if siblings:
-        counter = collections.Counter()
-        for s in siblings:
-            enc = _detect(s)
-            if enc in STRONG_NONASCII_ENCODINGS:
-                counter[enc] += 1
-        if counter:
-            return counter.most_common(1)[0][0]
-
-    return EXTENSION_DEFAULTS.get(ext, 'utf-8')
 
 
 def _block(message):

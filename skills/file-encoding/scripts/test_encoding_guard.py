@@ -234,42 +234,6 @@ class TestReadToolHook(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: _infer_encoding_for_new_file()
-# ---------------------------------------------------------------------------
-
-class TestInferEncodingForNewFile(unittest.TestCase):
-
-    def test_fallback_extension_default_ini(self):
-        """No siblings -> use EXTENSION_DEFAULTS (.ini -> utf-16-le-bom)."""
-        with TempProject() as root:
-            path = os.path.join(root, 'new.ini')
-            enc = eg._infer_encoding_for_new_file(path)
-            self.assertEqual(enc, 'utf-16-le-bom')
-
-    def test_fallback_extension_default_nsi(self):
-        with TempProject() as root:
-            path = os.path.join(root, 'install.nsi')
-            enc = eg._infer_encoding_for_new_file(path)
-            self.assertEqual(enc, 'utf-8-bom')
-
-    def test_sibling_gbk_inferred(self):
-        """Existing GBK siblings steer inference to gbk."""
-        with TempProject() as root:
-            for i in range(3):
-                p = os.path.join(root, 'dialog%d.rc' % i)
-                write_raw(p, b'\xd7\xd4\xc8\xcb')  # GBK bytes
-            new_path = os.path.join(root, 'new_dialog.rc')
-            enc = eg._infer_encoding_for_new_file(new_path)
-            self.assertEqual(enc, 'gbk')
-
-    def test_unknown_extension_returns_utf8(self):
-        with TempProject() as root:
-            path = os.path.join(root, 'file.unknown')
-            enc = eg._infer_encoding_for_new_file(path)
-            self.assertEqual(enc, 'utf-8')
-
-
-# ---------------------------------------------------------------------------
 # Unit tests: _detect() failure -> fail-open
 # ---------------------------------------------------------------------------
 
@@ -305,13 +269,12 @@ class TestEditWriteHook(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn('safe-edit', out)
 
-    def test_write_new_ini_blocked(self):
-        """New .ini file should be blocked (expected utf-16-le-bom)."""
+    def test_write_new_file_allowed(self):
+        """New file Write should be allowed (no block for non-existent files)."""
         with TempProject() as root:
             path = os.path.join(root, 'settings.ini')
-            code, out = run_hook('Write', path)
-            self.assertEqual(code, 2)
-            self.assertIn('utf-16-le-bom', out)
+            code, _ = run_hook('Write', path)
+            self.assertEqual(code, 0)
 
     def test_edit_outside_project_allowed(self):
         with TempDir() as root:
