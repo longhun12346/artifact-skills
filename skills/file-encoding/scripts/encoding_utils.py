@@ -1,29 +1,25 @@
 # -*- coding: utf-8 -*-
-"""encoding_utils.py - File encoding detection & edit toolkit.
+"""encoding_utils.py - File encoding detection & conversion toolkit.
 
 Usage:
-  python encoding_utils.py detect <file>          # print encoding name
-  python encoding_utils.py read <file> [--enc E]  # print decoded content to stdout
-  python encoding_utils.py write <file> --enc E   # read stdin, write with encoding E
-  python encoding_utils.py replace <file> --old S --new T [--enc E]
-                                                   # detect encoding, str.replace, write back
-  python encoding_utils.py replace <file> --stdin  # read JSON patches from stdin
-                                                   # JSON: [{"old":"a","new":"b"}, ...]
-  python encoding_utils.py safe-write <file>       # read stdin, auto-detect encoding, write back
-  python encoding_utils.py safe-write <file> --enc E  # new file: write stdin with encoding E
-  python encoding_utils.py convert <file> --to E         # convert encoding in-place
-  python encoding_utils.py convert <file> --to E [--enc F]  # with explicit source encoding
-  python encoding_utils.py --version               # print version
+  python encoding_utils.py detect <file>              # print encoding name
+  python encoding_utils.py read <file> [--enc E]      # print decoded content to stdout
+  python encoding_utils.py write <file> --enc E       # read stdin, write with encoding E
+  python encoding_utils.py safe-write <file> [--enc E]  # auto-detect + overwrite from stdin
+  python encoding_utils.py convert <file> --to E [--enc F]  # convert encoding in-place
+  python encoding_utils.py --version                  # print version
 
 Supported encoding names (friendly -> Python):
-  gbk, shift-jis, euc-kr, big5, utf-8, utf-8-bom, utf-16-le-bom, utf-16,
+  gbk, shift-jis, euc-kr, big5, utf-8, utf-8-bom, utf-16-le-bom, utf-16-be-bom,
   windows-1250 ~ windows-1258, iso-8859-1, iso-8859-2
+
+This module is also imported by encoding_transparent.py (the hook) for its
+detect_encoding(), read_with_encoding(), write_with_encoding() functions.
 """
 
-__version__ = "1.6.2"
+__version__ = "2.0.0"
 
 import argparse
-import json
 import io
 import os
 import sys
@@ -47,12 +43,6 @@ def _get_sys_encoding():
         pass
     return 'utf-8'
 
-
-def _to_unicode(s):
-    """Decode bytes to unicode in Python 2; no-op in Python 3."""
-    if _IS_PY2 and isinstance(s, bytes):
-        return s.decode(_get_sys_encoding())
-    return s
 
 
 def _read_stdin_unicode(binary_mode=False):
@@ -178,7 +168,13 @@ def detect_encoding(filepath):
 
 
 def _friendly_to_python(enc):
-    """Map friendly encoding name to Python encoding string."""
+    """Map friendly encoding name to Python encoding string.
+
+    Note: utf-16-le-bom and utf-16-be-bom use explicit LE/BE codecs
+    (without BOM) because Python's 'utf-16' always writes native-endian
+    on output, which would lose the original byte order for BE files.
+    BOM is handled manually by the read/write helpers below.
+    """
     mapping = {
         'gbk': 'gbk',
         'shift-jis': 'shift-jis',
@@ -197,11 +193,60 @@ def _friendly_to_python(enc):
         'iso-8859-2': 'iso-8859-2',
         'utf-8': 'utf-8',
         'utf-8-bom': 'utf-8-sig',
-        'utf-16-le-bom': 'utf-16',
-        'utf-16-be-bom': 'utf-16',
+        'utf-16-le-bom': 'utf-16-le',
+        'utf-16-be-bom': 'utf-16-be',
         'utf-16': 'utf-16',
     }
     return mapping.get(enc, enc)
+
+
+# BOM bytes for UTF-16 variants (used by read/write helpers)
+_BOM_FOR_ENCODING = {
+    'utf-16-le-bom': b'\xff\xfe',
+    'utf-16-be-bom': b'\xfe\xff',
+}
+
+
+def read_with_encoding(filepath, enc, newline=''):
+    """Read file content as unicode, handling BOM for utf-16-le-bom/be-bom.
+
+    Returns the file content as a unicode string (without BOM character).
+    """
+    if enc in _BOM_FOR_ENCODING:
+        # Read raw, skip BOM bytes, decode with explicit LE/BE codec
+        bom = _BOM_FOR_ENCODING[enc]
+        with open(filepath, 'rb') as f:
+            raw = f.read()
+        if raw[:len(bom)] == bom:
+            raw = raw[len(bom):]
+        pyenc = _friendly_to_python(enc)
+        content = raw.decode(pyenc)
+        if newline == '':
+            return content
+        # Default newline handling: translate \r\n → \n
+        return content.replace(u'\r\n', u'\n')
+    else:
+        pyenc = _friendly_to_python(enc)
+        with io.open(filepath, 'r', encoding=pyenc, newline=newline) as f:
+            return f.read()
+
+
+def write_with_encoding(filepath, content, enc, newline=''):
+    """Write unicode content to file, handling BOM for utf-16-le-bom/be-bom.
+
+    Writes BOM prefix + encoded content for UTF-16 BOM variants.
+    """
+    if enc in _BOM_FOR_ENCODING:
+        bom = _BOM_FOR_ENCODING[enc]
+        pyenc = _friendly_to_python(enc)
+        encoded = content.encode(pyenc)
+        with open(filepath, 'wb') as f:
+            f.write(bom)
+            f.write(encoded)
+    else:
+        pyenc = _friendly_to_python(enc)
+        with io.open(filepath, 'w', encoding=pyenc, newline=newline) as f:
+            f.write(content)
 
 
 # ---------------------------------------------------------------------------
@@ -219,21 +264,18 @@ def cmd_read(args):
     if enc == 'binary':
         sys.stderr.write("ERROR: cannot read binary file\n")
         return 1
-    pyenc = _friendly_to_python(enc)
 
     try:
-        with io.open(args.file, 'r', encoding=pyenc) as f:
-            content = f.read()
+        content = read_with_encoding(args.file, enc, newline='')
     except UnicodeDecodeError:
         fallbacks = ['utf-8', 'gbk', 'shift-jis', 'euc-kr', 'big5',
-                     'windows-1252', 'iso-8859-1', 'utf-16']
+                     'windows-1252', 'iso-8859-1']
         for fb in fallbacks:
-            if fb == pyenc:
+            if fb == enc:
                 continue
             try:
-                with io.open(args.file, 'r', encoding=fb) as f:
-                    content = f.read()
-                sys.stderr.write("[encoding_utils] WARN: decode failed with %s, fell back to %s\n" % (pyenc, fb))
+                content = read_with_encoding(args.file, fb, newline='')
+                sys.stderr.write("[encoding_utils] WARN: decode failed with %s, fell back to %s\n" % (enc, fb))
                 break
             except UnicodeDecodeError:
                 continue
@@ -251,103 +293,10 @@ def cmd_write(args):
         sys.stderr.write("ERROR: --encoding required for write\n")
         return 1
 
-    pyenc = _friendly_to_python(args.encoding)
     content = _read_stdin_unicode()
-
-    with io.open(args.file, 'w', encoding=pyenc) as f:
-        f.write(content)
+    write_with_encoding(args.file, content, args.encoding, newline='')
 
     print("OK: %s written with encoding %s" % (args.file, args.encoding))
-    return 0
-
-
-def cmd_replace(args):
-    enc = args.encoding or detect_encoding(args.file)
-    if enc == 'binary':
-        sys.stderr.write("ERROR: cannot replace in binary file\n")
-        return 1
-    pyenc = _friendly_to_python(enc)
-
-    if args.stdin:
-        raw_json = _read_stdin_unicode()
-        patches = json.loads(raw_json)
-    else:
-        if not args.old or args.new is None:
-            sys.stderr.write("ERROR: --old and --new required (or --stdin for JSON patches)\n")
-            return 1
-        patches = [{"old": _to_unicode(args.old), "new": _to_unicode(args.new)}]
-
-    with io.open(args.file, 'r', encoding=pyenc, newline='') as f:
-        content = f.read()
-
-    count_total = 0
-    for p in patches:
-        old = _normalize_pattern(_to_unicode(p['old']), content)
-        n = content.count(old)
-        content = content.replace(old, _to_unicode(p['new']))
-        count_total += n
-
-    if count_total == 0:
-        sys.stderr.write("ERROR: no patterns matched in file\n")
-        return 1
-
-    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:
-        f.write(content)
-
-    print("OK: %d replacement(s) total, encoding %s preserved" % (count_total, enc))
-    return 0
-
-
-def _normalize_pattern(old_str, content):
-    """Return the variant of old_str that matches the file's actual line endings.
-
-    When the caller passes a pattern with bare LF ('\\n') but the file uses CRLF
-    ('\\r\\n'), the literal match fails.  This function retries with CRLF so that
-    callers never have to think about line endings.
-
-    Returns the matching variant of old_str, or the original if neither matches.
-    """
-    if old_str in content:
-        return old_str
-    # Try promoting bare LF -> CRLF in the pattern
-    crlf_variant = old_str.replace(u'\r\n', u'\n').replace(u'\n', u'\r\n')
-    if crlf_variant in content:
-        return crlf_variant
-    return old_str  # caller will handle "not found"
-
-
-def cmd_safe_edit(args):
-    """Detect encoding + replace in one command. No encoding knowledge required."""
-    enc = detect_encoding(args.file)
-    if enc == 'binary':
-        sys.stderr.write("ERROR: cannot edit binary file\n")
-        return 1
-
-    # Parse old/new as unicode
-    old_str = _to_unicode(args.old) if args.old else u''
-    new_str = _to_unicode(args.new) if args.new is not None else u''
-
-    if not old_str:
-        sys.stderr.write("ERROR: --old pattern must not be empty\n")
-        return 1
-
-    pyenc = _friendly_to_python(enc)
-
-    with io.open(args.file, 'r', encoding=pyenc, newline='') as f:
-        content = f.read()
-
-    old_str = _normalize_pattern(old_str, content)
-    count = content.count(old_str)
-    if count == 0:
-        sys.stderr.write("ERROR: pattern not found in file\n")
-        return 1
-
-    content = content.replace(old_str, new_str)
-
-    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:
-        f.write(content)
-
-    print("OK: %d replacement(s), encoding '%s' preserved" % (count, enc))
     return 0
 
 
@@ -366,13 +315,9 @@ def cmd_safe_write(args):
         sys.stderr.write("ERROR: file does not exist; --enc required\n")
         return 1
 
-    pyenc = _friendly_to_python(enc)
-
     # Read stdin via buffer so non-ASCII survives Windows console code page
     content = _read_stdin_unicode(binary_mode=True)
-
-    with io.open(args.file, 'w', encoding=pyenc, newline='') as f:  # newline='' preserves \r\n
-        f.write(content)
+    write_with_encoding(args.file, content, enc, newline='')
 
     print("OK: written, encoding '%s' preserved" % enc)
     return 0
@@ -387,14 +332,9 @@ def cmd_convert(args):
     if enc == args.to:
         print("OK: already %s, no conversion needed" % enc)
         return 0
-    pyenc_from = _friendly_to_python(enc)
-    pyenc_to = _friendly_to_python(args.to)
 
-    with io.open(args.file, 'r', encoding=pyenc_from, newline='') as f:
-        content = f.read()
-
-    with io.open(args.file, 'w', encoding=pyenc_to, newline='') as f:
-        f.write(content)
+    content = read_with_encoding(args.file, enc, newline='')
+    write_with_encoding(args.file, content, args.to, newline='')
 
     print("OK: converted %s -> %s" % (enc, args.to))
     return 0
@@ -405,14 +345,14 @@ def cmd_convert(args):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description='File encoding detection & edit toolkit')
+    parser = argparse.ArgumentParser(description='File encoding detection & conversion toolkit')
     parser.add_argument('--version', action='version', version='encoding_utils.py ' + __version__)
     sub = parser.add_subparsers(dest='command')
 
     p_detect = sub.add_parser('detect', help='Detect file encoding')
     p_detect.add_argument('file', help='File path')
 
-    p_read = sub.add_parser('read', help='Read file, print to stdout')
+    p_read = sub.add_parser('read', help='Read file, print to stdout as UTF-8')
     p_read.add_argument('file', help='File path')
     p_read.add_argument('--encoding', '--enc', default=None, dest='encoding',
                         help='Encoding override (default: auto-detect)')
@@ -421,24 +361,6 @@ def main():
     p_write.add_argument('file', help='File path')
     p_write.add_argument('--encoding', '--enc', required=True, dest='encoding',
                          help='Target encoding (e.g. gbk, utf-8-bom, utf-16-le-bom)')
-
-    p_replace = sub.add_parser('replace', help='Replace string in file, preserve encoding')
-    p_replace.add_argument('file', help='File path')
-    p_replace.add_argument('--encoding', '--enc', default=None, dest='encoding',
-                           help='Encoding (default: auto-detect)')
-    p_replace.add_argument('--old', default=None, dest='old',
-                           help='String to replace')
-    p_replace.add_argument('--new', default=None, dest='new',
-                           help='Replacement string')
-    p_replace.add_argument('--stdin', action='store_true', default=False,
-                           help='Read JSON patch list from stdin instead of --old/--new')
-
-    p_safe_edit = sub.add_parser('safe-edit', help='Detect encoding + replace in one step (safest option)')
-    p_safe_edit.add_argument('file', help='File path')
-    p_safe_edit.add_argument('--old', required=True, dest='old',
-                             help='String to replace')
-    p_safe_edit.add_argument('--new', required=True, dest='new',
-                             help='Replacement string')
 
     p_safe_write = sub.add_parser('safe-write', help='Auto-detect encoding + full file rewrite from stdin')
     p_safe_write.add_argument('file', help='File path')
@@ -460,10 +382,6 @@ def main():
         return cmd_read(args)
     elif args.command == 'write':
         return cmd_write(args)
-    elif args.command == 'replace':
-        return cmd_replace(args)
-    elif args.command == 'safe-edit':
-        return cmd_safe_edit(args)
     elif args.command == 'safe-write':
         return cmd_safe_write(args)
     elif args.command == 'convert':

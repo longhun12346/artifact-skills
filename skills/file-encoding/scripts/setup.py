@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""setup.py - Install or uninstall the encoding_guard PreToolUse hook.
+"""setup.py - Install or uninstall the encoding_transparent hook.
 
-Modifies ~/.claude/settings.json to register encoding_guard.py as a
-PreToolUse hook that intercepts Edit/Write tool calls.
+Modifies ~/.claude/settings.json to register encoding_transparent.py as
+PreToolUse + PostToolUse hooks that transparently handle file encoding.
 
 Usage:
-  python setup.py             # install hook
-  python setup.py --uninstall # remove hook
+  python setup.py             # install hooks
+  python setup.py --uninstall # remove hooks (also removes old encoding_guard if present)
   python setup.py --check     # print current status, exit 0=installed 1=not installed
 
 Compatible with Python 2.6+ and 3.x.
@@ -21,8 +21,9 @@ import sys
 
 _SETTINGS_PATH = os.path.join(os.path.expanduser('~'), '.claude', 'settings.json')
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-_GUARD_PATH = os.path.join(_SCRIPTS_DIR, 'encoding_guard.py')
-_GUARD_MARKER = 'encoding_guard.py'
+_HOOK_PATH = os.path.join(_SCRIPTS_DIR, 'encoding_transparent.py')
+_HOOK_MARKER = 'encoding_transparent.py'
+_OLD_MARKER = 'encoding_guard.py'
 
 
 def _load_settings():
@@ -30,7 +31,10 @@ def _load_settings():
         return {}
     try:
         with io.open(_SETTINGS_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            content = f.read().strip()
+        if not content:
+            return {}
+        return json.loads(content)
     except (ValueError, IOError) as e:
         print('ERROR: cannot parse {}: {}'.format(_SETTINGS_PATH, e))
         sys.exit(1)
@@ -49,74 +53,123 @@ def _save_settings(data):
         f.write(content)
 
 
-def _hook_command():
-    # Forward slashes: bash does not eat them on Windows; Python accepts them.
-    path = _GUARD_PATH.replace(chr(92), '/')
-    return 'python "{}"'.format(path)
+def _hook_command(mode):
+    """Return the hook command string for the given mode (pre/post)."""
+    path = _HOOK_PATH.replace(chr(92), '/')
+    return 'python "{}" {}'.format(path, mode)
 
 
-def _is_installed(settings):
+def _has_marker(settings, hook_type, marker):
+    """Check if a hook with the given marker is installed in hook_type."""
     hooks = settings.get('hooks', {})
-    for group in hooks.get('PreToolUse', []):
+    for group in hooks.get(hook_type, []):
         for hook in group.get('hooks', []):
-            if _GUARD_MARKER in hook.get('command', ''):
+            if marker in hook.get('command', ''):
                 return True
     return False
 
 
+def _is_installed(settings):
+    return (_has_marker(settings, 'PreToolUse', _HOOK_MARKER) and
+            _has_marker(settings, 'PostToolUse', _HOOK_MARKER))
+
+
+def _remove_marker(settings, hook_type, marker):
+    """Remove all hook groups containing the marker from hook_type."""
+    hooks = settings.get('hooks', {})
+    groups = hooks.get(hook_type, [])
+    new_groups = []
+    for group in groups:
+        filtered = [h for h in group.get('hooks', [])
+                    if marker not in h.get('command', '')]
+        if filtered:
+            group = dict(group)
+            group['hooks'] = filtered
+            new_groups.append(group)
+    if new_groups:
+        hooks[hook_type] = new_groups
+    elif hook_type in hooks:
+        del hooks[hook_type]
+    if hooks:
+        settings['hooks'] = hooks
+    elif 'hooks' in settings:
+        del settings['hooks']
+
+
 def install(settings):
     if _is_installed(settings):
-        print('encoding_guard hook already installed in {}'.format(_SETTINGS_PATH))
+        print('encoding_transparent hooks already installed in {}'.format(_SETTINGS_PATH))
         return
-    if not os.path.exists(_GUARD_PATH):
-        print('ERROR: encoding_guard.py not found at {}'.format(_GUARD_PATH))
+
+    if not os.path.exists(_HOOK_PATH):
+        print('ERROR: encoding_transparent.py not found at {}'.format(_HOOK_PATH))
         sys.exit(1)
-    hook_group = {
-        'matcher': 'Edit|Write',
-        'hooks': [{'type': 'command', 'command': _hook_command()}],
+
+    # Remove old encoding_guard if present
+    if _has_marker(settings, 'PreToolUse', _OLD_MARKER):
+        _remove_marker(settings, 'PreToolUse', _OLD_MARKER)
+        print('Removed old encoding_guard hook.')
+
+    # Install PreToolUse
+    pre_group = {
+        'matcher': 'Edit|Write|Read',
+        'hooks': [{'type': 'command', 'command': _hook_command('pre')}],
     }
     if 'hooks' not in settings:
         settings['hooks'] = {}
     if 'PreToolUse' not in settings['hooks']:
         settings['hooks']['PreToolUse'] = []
-    settings['hooks']['PreToolUse'].append(hook_group)
+    settings['hooks']['PreToolUse'].append(pre_group)
+
+    # Install PostToolUse
+    post_group = {
+        'matcher': 'Edit|Write|Read',
+        'hooks': [{'type': 'command', 'command': _hook_command('post')}],
+    }
+    if 'PostToolUse' not in settings['hooks']:
+        settings['hooks']['PostToolUse'] = []
+    settings['hooks']['PostToolUse'].append(post_group)
+
     _save_settings(settings)
-    print('OK: hook installed -> {}'.format(_SETTINGS_PATH))
-    print('    command: {}'.format(_hook_command()))
+    print('OK: hooks installed -> {}'.format(_SETTINGS_PATH))
+    print('    PreToolUse:  {}'.format(_hook_command('pre')))
+    print('    PostToolUse: {}'.format(_hook_command('post')))
     print('Restart Claude Code to activate.')
 
 
 def uninstall(settings):
-    if not _is_installed(settings):
-        print('encoding_guard hook not found in {}'.format(_SETTINGS_PATH))
+    removed = False
+
+    if _has_marker(settings, 'PreToolUse', _HOOK_MARKER):
+        _remove_marker(settings, 'PreToolUse', _HOOK_MARKER)
+        removed = True
+    if _has_marker(settings, 'PostToolUse', _HOOK_MARKER):
+        _remove_marker(settings, 'PostToolUse', _HOOK_MARKER)
+        removed = True
+
+    # Also remove old encoding_guard if present
+    if _has_marker(settings, 'PreToolUse', _OLD_MARKER):
+        _remove_marker(settings, 'PreToolUse', _OLD_MARKER)
+        removed = True
+
+    if not removed:
+        print('No encoding hooks found in {}'.format(_SETTINGS_PATH))
         return
-    hooks = settings.get('hooks', {})
-    pre = hooks.get('PreToolUse', [])
-    new_pre = []
-    for group in pre:
-        filtered = [h for h in group.get('hooks', [])
-                    if _GUARD_MARKER not in h.get('command', '')]
-        if filtered:
-            group = dict(group)
-            group['hooks'] = filtered
-            new_pre.append(group)
-    if new_pre:
-        settings['hooks']['PreToolUse'] = new_pre
-    else:
-        del settings['hooks']['PreToolUse']
-        if not settings['hooks']:
-            del settings['hooks']
+
     _save_settings(settings)
-    print('OK: hook removed from {}'.format(_SETTINGS_PATH))
+    print('OK: hooks removed from {}'.format(_SETTINGS_PATH))
     print('Restart Claude Code to deactivate.')
 
 
 def check(settings):
     if _is_installed(settings):
-        print('INSTALLED: encoding_guard hook active in {}'.format(_SETTINGS_PATH))
+        print('INSTALLED: encoding_transparent hooks active in {}'.format(_SETTINGS_PATH))
         sys.exit(0)
+    elif _has_marker(settings, 'PreToolUse', _OLD_MARKER):
+        print('OLD VERSION: encoding_guard (blocking) hook found. Run setup.py to upgrade.')
+        sys.exit(1)
     else:
-        print('NOT INSTALLED: encoding_guard hook not found in {}'.format(_SETTINGS_PATH))
+        print('NOT INSTALLED: no encoding hooks found in {}'.format(_SETTINGS_PATH))
         sys.exit(1)
 
 

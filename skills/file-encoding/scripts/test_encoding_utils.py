@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for encoding_utils.py — compatible with Python 2.6+ and 3.x.
+"""Tests for encoding_utils.py v2.0.0 — compatible with Python 2.6+ and 3.x.
 
 Usage:
   python test_encoding_utils.py
@@ -50,12 +50,9 @@ class TestDetectEncoding(unittest.TestCase):
 
     def _write_temp(self, raw_bytes):
         fd, path = tempfile.mkstemp(suffix='.txt')
-        try:
-            with os.fdopen(fd, 'wb') as f:
-                f.write(raw_bytes)
-            return path
-        finally:
-            pass  # keep fd open, caller cleans up
+        with os.fdopen(fd, 'wb') as f:
+            f.write(raw_bytes)
+        return path
 
     def test_utf8_no_bom(self):
         raw = u'hello world'.encode('utf-8')
@@ -78,6 +75,14 @@ class TestDetectEncoding(unittest.TestCase):
         path = self._write_temp(raw)
         try:
             self.assertEqual(eu.detect_encoding(path), 'utf-16-le-bom')
+        finally:
+            os.unlink(path)
+
+    def test_utf16_be_bom(self):
+        raw = b'\xfe\xff' + u'hello world'.encode('utf-16-be')
+        path = self._write_temp(raw)
+        try:
+            self.assertEqual(eu.detect_encoding(path), 'utf-16-be-bom')
         finally:
             os.unlink(path)
 
@@ -107,11 +112,167 @@ class TestFriendlyToPython(unittest.TestCase):
         self.assertEqual(eu._friendly_to_python('utf-8-bom'), 'utf-8-sig')
 
     def test_utf16_le_bom(self):
-        self.assertEqual(eu._friendly_to_python('utf-16-le-bom'), 'utf-16')
+        self.assertEqual(eu._friendly_to_python('utf-16-le-bom'), 'utf-16-le')
+
+    def test_utf16_be_bom(self):
+        self.assertEqual(eu._friendly_to_python('utf-16-be-bom'), 'utf-16-be')
 
     def test_unknown_passthrough(self):
         self.assertEqual(eu._friendly_to_python('cp936'), 'cp936')
 
+
+# ---------------------------------------------------------------------------
+# Tests: read_with_encoding / write_with_encoding
+# ---------------------------------------------------------------------------
+
+class TestReadWriteWithEncoding(unittest.TestCase):
+    """Test the read_with_encoding / write_with_encoding public API."""
+
+    def _write_temp(self, raw_bytes, suffix='.txt'):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(raw_bytes)
+        return path
+
+    def test_read_gbk(self):
+        text = u'你好世界'
+        path = self._write_temp(text.encode('gbk'))
+        try:
+            result = eu.read_with_encoding(path, 'gbk', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_read_utf8_bom(self):
+        text = u'hello world'
+        raw = b'\xef\xbb\xbf' + text.encode('utf-8')
+        path = self._write_temp(raw)
+        try:
+            result = eu.read_with_encoding(path, 'utf-8-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_read_utf16_le_bom(self):
+        text = u'hello 你好'
+        raw = b'\xff\xfe' + text.encode('utf-16-le')
+        path = self._write_temp(raw)
+        try:
+            result = eu.read_with_encoding(path, 'utf-16-le-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_read_utf16_be_bom(self):
+        text = u'hello 你好'
+        raw = b'\xfe\xff' + text.encode('utf-16-be')
+        path = self._write_temp(raw)
+        try:
+            result = eu.read_with_encoding(path, 'utf-16-be-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_write_gbk(self):
+        text = u'你好世界'
+        fd, path = tempfile.mkstemp(suffix='.cpp')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'gbk', newline='')
+            with open(path, 'rb') as f:
+                raw = f.read()
+            self.assertEqual(raw, text.encode('gbk'))
+        finally:
+            os.unlink(path)
+
+    def test_write_utf8_bom(self):
+        text = u'hello world'
+        fd, path = tempfile.mkstemp(suffix='.nsi')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-8-bom', newline='')
+            with open(path, 'rb') as f:
+                raw = f.read()
+            self.assertEqual(raw, b'\xef\xbb\xbf' + text.encode('utf-8'))
+        finally:
+            os.unlink(path)
+
+    def test_write_utf16_le_bom(self):
+        text = u'hello 你好'
+        fd, path = tempfile.mkstemp(suffix='.ini')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-16-le-bom', newline='')
+            with open(path, 'rb') as f:
+                raw = f.read()
+            self.assertEqual(raw, b'\xff\xfe' + text.encode('utf-16-le'))
+        finally:
+            os.unlink(path)
+
+    def test_write_utf16_be_bom(self):
+        text = u'hello 你好'
+        fd, path = tempfile.mkstemp(suffix='.ini')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-16-be-bom', newline='')
+            with open(path, 'rb') as f:
+                raw = f.read()
+            self.assertEqual(raw, b'\xfe\xff' + text.encode('utf-16-be'))
+        finally:
+            os.unlink(path)
+
+    def test_roundtrip_utf16_le_bom(self):
+        """Write then read preserves content for UTF-16 LE BOM."""
+        text = u'[Section]\r\nkey=value\r\n'
+        fd, path = tempfile.mkstemp(suffix='.ini')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-16-le-bom', newline='')
+            result = eu.read_with_encoding(path, 'utf-16-le-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_roundtrip_utf16_be_bom(self):
+        """Write then read preserves content for UTF-16 BE BOM."""
+        text = u'[Section]\r\nkey=value\r\n'
+        fd, path = tempfile.mkstemp(suffix='.ini')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-16-be-bom', newline='')
+            result = eu.read_with_encoding(path, 'utf-16-be-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_roundtrip_gbk_crlf(self):
+        """Write then read preserves CRLF for GBK."""
+        text = u'注释\r\n代码\r\n'
+        fd, path = tempfile.mkstemp(suffix='.cpp')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'gbk', newline='')
+            result = eu.read_with_encoding(path, 'gbk', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_roundtrip_utf8_bom_crlf(self):
+        """Write then read preserves CRLF for UTF-8 BOM."""
+        text = u'line1\r\nline2\r\n'
+        fd, path = tempfile.mkstemp(suffix='.nsi')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-8-bom', newline='')
+            result = eu.read_with_encoding(path, 'utf-8-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Tests: cmd_read / cmd_write round trip via CLI API
+# ---------------------------------------------------------------------------
 
 class TestRoundTrip(unittest.TestCase):
     """Test that write+read preserves content for each encoding."""
@@ -173,10 +334,10 @@ class TestRoundTrip(unittest.TestCase):
         self._roundtrip('utf-8-bom', u'hello world\n')
 
     def test_utf16_le_bom(self):
-        self._roundtrip('utf-16-le-bom', u'hello unicode: \u4f60\u597d\n')
+        self._roundtrip('utf-16-le-bom', u'hello unicode: 你好\n')
 
     def test_gbk_with_chinese(self):
-        self._roundtrip('gbk', u'hello world: \u4f60\u597d\u4e16\u754c\n')
+        self._roundtrip('gbk', u'hello world: 你好世界\n')
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +372,8 @@ class TestSafeWrite(unittest.TestCase):
             sys.stdin = saved
 
     def test_existing_gbk_preserved(self):
-        # Use content that chardet reliably identifies as GB2312/GBK (not EUC-TW)
-        gbk_content = u'\u6ce8\u91ca\u4e2d\u6587\u6587\u4ef6\u5904\u7406' * 10
+        # Use content that chardet reliably identifies as GB2312/GBK
+        gbk_content = u'注释中文文件处理' * 10
         path = self._write_file(gbk_content.encode('gbk'))
         try:
             ret = self._run(path, gbk_content)
@@ -257,7 +418,7 @@ class TestSafeWrite(unittest.TestCase):
 
     def test_enc_arg_overrides_detection(self):
         """--enc on existing file skips auto-detect."""
-        path = self._write_file(u'\u6ce8'.encode('gbk'))
+        path = self._write_file(u'注'.encode('gbk'))
         try:
             ret = self._run(path, u'// replaced', enc_arg='utf-8')
             self.assertEqual(ret, 0)
@@ -279,7 +440,7 @@ class TestConvert(unittest.TestCase):
         return path
 
     def test_convert_gbk_to_utf8(self):
-        path = self._write_file((u'hello \u4e2d\u6587 ' * 20).encode('gbk'))
+        path = self._write_file((u'hello 中文 ' * 20).encode('gbk'))
         try:
             Args = type('Args', (), {'file': path, 'to': 'utf-8', 'encoding': None})
             ret = eu.cmd_convert(Args())
@@ -287,7 +448,7 @@ class TestConvert(unittest.TestCase):
             # Verify content round-trips correctly as UTF-8
             with io.open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            self.assertIn(u'\u4e2d\u6587', content)
+            self.assertIn(u'中文', content)
         finally:
             os.unlink(path)
 
@@ -310,126 +471,211 @@ class TestConvert(unittest.TestCase):
         finally:
             os.unlink(path)
 
-
-# ---------------------------------------------------------------------------
-# Tests: safe-edit error path
-# ---------------------------------------------------------------------------
-
-class TestSafeEditErrors(unittest.TestCase):
-
-    def test_pattern_not_found_returns_error_exit1(self):
-        fd, path = tempfile.mkstemp(suffix='.cpp')
-        with os.fdopen(fd, 'wb') as f:
-            f.write(b'int x = 1;')
+    def test_convert_utf8_to_utf16_le_bom(self):
+        path = self._write_file(u'hello 你好'.encode('utf-8'))
         try:
-            saved_err = sys.stderr
-            if sys.version_info[0] >= 3:
-                sys.stderr = io.StringIO()
-            else:
-                import StringIO as _sio
-                sys.stderr = _sio.StringIO()
-            try:
-                Args = type('Args', (), {'file': path, 'old': 'NO_MATCH', 'new': 'X'})
-                ret = eu.cmd_safe_edit(Args())
-                msg = sys.stderr.getvalue()
-            finally:
-                sys.stderr = saved_err
-            self.assertEqual(ret, 1)
-            self.assertIn('ERROR', msg)
+            Args = type('Args', (), {'file': path, 'to': 'utf-16-le-bom', 'encoding': None})
+            ret = eu.cmd_convert(Args())
+            self.assertEqual(ret, 0)
+            self.assertEqual(eu.detect_encoding(path), 'utf-16-le-bom')
+            content = eu.read_with_encoding(path, 'utf-16-le-bom', newline='')
+            self.assertIn(u'你好', content)
         finally:
             os.unlink(path)
 
-    def test_empty_old_pattern_rejected(self):
-        """Empty --old must be rejected without touching the file (Bug: '' corrupts file)."""
-        original = b'int x = 1;'
-        fd, path = tempfile.mkstemp(suffix='.cpp')
-        with os.fdopen(fd, 'wb') as f:
-            f.write(original)
+    def test_convert_utf8_to_utf16_be_bom(self):
+        path = self._write_file(u'hello 你好'.encode('utf-8'))
         try:
-            saved_err = sys.stderr
-            sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
-            try:
-                Args = type('Args', (), {'file': path, 'old': '', 'new': 'X'})
-                ret = eu.cmd_safe_edit(Args())
-                msg = sys.stderr.getvalue()
-            finally:
-                sys.stderr = saved_err
-            self.assertEqual(ret, 1)
-            self.assertIn('ERROR', msg)
-            # File must be unchanged
-            with open(path, 'rb') as f:
-                self.assertEqual(f.read(), original)
+            Args = type('Args', (), {'file': path, 'to': 'utf-16-be-bom', 'encoding': None})
+            ret = eu.cmd_convert(Args())
+            self.assertEqual(ret, 0)
+            self.assertEqual(eu.detect_encoding(path), 'utf-16-be-bom')
+            content = eu.read_with_encoding(path, 'utf-16-be-bom', newline='')
+            self.assertIn(u'你好', content)
         finally:
             os.unlink(path)
 
-    def test_empty_old_none_pattern_rejected(self):
-        """None --old must also be rejected."""
-        fd, path = tempfile.mkstemp(suffix='.cpp')
-        with os.fdopen(fd, 'wb') as f:
-            f.write(b'int x = 1;')
+    def test_convert_utf16_le_to_utf16_be(self):
+        """Convert from UTF-16 LE BOM to UTF-16 BE BOM preserves content."""
+        text = u'hello 世界 world'
+        raw = b'\xff\xfe' + text.encode('utf-16-le')
+        path = self._write_file(raw, suffix='.ini')
         try:
-            saved_err = sys.stderr
-            sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
-            try:
-                Args = type('Args', (), {'file': path, 'old': None, 'new': 'X'})
-                ret = eu.cmd_safe_edit(Args())
-            finally:
-                sys.stderr = saved_err
-            self.assertEqual(ret, 1)
+            Args = type('Args', (), {'file': path, 'to': 'utf-16-be-bom', 'encoding': None})
+            ret = eu.cmd_convert(Args())
+            self.assertEqual(ret, 0)
+            self.assertEqual(eu.detect_encoding(path), 'utf-16-be-bom')
+            content = eu.read_with_encoding(path, 'utf-16-be-bom', newline='')
+            self.assertEqual(content, text)
         finally:
             os.unlink(path)
 
 
 # ---------------------------------------------------------------------------
-# Tests: cmd_write batch-patch error path
+# Tests: UTF-16 BE BOM specific
 # ---------------------------------------------------------------------------
 
-class TestWriteBatchPatch(unittest.TestCase):
+class TestUtf16BeBom(unittest.TestCase):
+    """Specific tests for UTF-16 BE BOM endianness preservation."""
 
-    def _make_file(self, content_bytes, suffix='.cpp'):
+    def _write_temp(self, raw_bytes, suffix='.ini'):
         fd, path = tempfile.mkstemp(suffix=suffix)
         with os.fdopen(fd, 'wb') as f:
-            f.write(content_bytes)
+            f.write(raw_bytes)
         return path
 
-    def _run_write_batch(self, path, patches_json):
-        """Run cmd_replace in batch-patch mode (--stdin) with patches_json as stdin."""
-        saved = sys.stdin
+    def test_detect_utf16_be_bom(self):
+        """UTF-16 BE BOM file correctly detected."""
+        text = u'[Section]\nkey=value\n'
+        raw = b'\xfe\xff' + text.encode('utf-16-be')
+        path = self._write_temp(raw)
         try:
-            if sys.version_info[0] >= 3:
-                sys.stdin = io.StringIO(patches_json)
-            else:
-                sys.stdin = __import__('StringIO').StringIO(patches_json)
-            Args = type('Args', (), {'file': path, 'encoding': None, 'old': None, 'new': None, 'stdin': True})
-            return eu.cmd_replace(Args())
-        finally:
-            sys.stdin = saved
-
-    def test_batch_no_match_returns_error(self):
-        """batch-patch where no pattern matches must return exit 1 (Bug: was silently exit 0)."""
-        path = self._make_file(b'int x = 1;')
-        try:
-            saved_err = sys.stderr
-            sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
-            try:
-                ret = self._run_write_batch(path, '[{"old": "NO_MATCH", "new": "Y"}]')
-                msg = sys.stderr.getvalue()
-            finally:
-                sys.stderr = saved_err
-            self.assertEqual(ret, 1)
-            self.assertIn('ERROR', msg)
+            self.assertEqual(eu.detect_encoding(path), 'utf-16-be-bom')
         finally:
             os.unlink(path)
 
-    def test_batch_partial_match_still_succeeds(self):
-        """batch-patch where at least one pattern matches must succeed (count_total > 0)."""
-        path = self._make_file(b'int x = 1; int y = 2;')
+    def test_read_preserves_crlf(self):
+        """Reading UTF-16 BE BOM with newline='' preserves CRLF."""
+        text = u'line1\r\nline2\r\n'
+        raw = b'\xfe\xff' + text.encode('utf-16-be')
+        path = self._write_temp(raw)
         try:
-            ret = self._run_write_batch(path,
-                '[{"old": "int x = 1;", "new": "int x = 10;"}, '
-                '{"old": "NO_MATCH", "new": "Z"}]')
-            self.assertEqual(ret, 0)
+            result = eu.read_with_encoding(path, 'utf-16-be-bom', newline='')
+            self.assertEqual(result, text)
+            self.assertIn(u'\r\n', result)
+        finally:
+            os.unlink(path)
+
+    def test_write_produces_correct_bom(self):
+        """Writing UTF-16 BE BOM produces FE FF BOM followed by big-endian bytes."""
+        text = u'AB'
+        fd, path = tempfile.mkstemp(suffix='.ini')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-16-be-bom', newline='')
             with open(path, 'rb') as f:
-                self.assertIn(b'int x = 10;', f.read())
+                raw = f.read()
+            # FE FF + 'A' in BE (00 41) + 'B' in BE (00 42)
+            expected = b'\xfe\xff\x00\x41\x00\x42'
+            self.assertEqual(raw, expected)
         finally:
             os.unlink(path)
+
+    def test_endianness_not_flipped(self):
+        """Ensure BE stays BE through write+read cycle (no LE contamination)."""
+        text = u'你好'  # U+4F60 U+597D
+        fd, path = tempfile.mkstemp(suffix='.ini')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-16-be-bom', newline='')
+            with open(path, 'rb') as f:
+                raw = f.read()
+            # BOM: FE FF
+            self.assertEqual(raw[:2], b'\xfe\xff')
+            # U+4F60 in BE: 4F 60
+            self.assertEqual(raw[2:4], b'\x4f\x60')
+            # U+597D in BE: 59 7D
+            self.assertEqual(raw[4:6], b'\x59\x7d')
+        finally:
+            os.unlink(path)
+
+    def test_roundtrip_chinese_content(self):
+        """Full write+read roundtrip with Chinese content preserves everything."""
+        text = u'注释中文文件\r\n第二行\r\n'
+        fd, path = tempfile.mkstemp(suffix='.ini')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'utf-16-be-bom', newline='')
+            result = eu.read_with_encoding(path, 'utf-16-be-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Tests: edge cases
+# ---------------------------------------------------------------------------
+
+class TestEdgeCases(unittest.TestCase):
+    """Edge cases for encoding detection and I/O."""
+
+    def _write_temp(self, raw_bytes, suffix='.txt'):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(raw_bytes)
+        return path
+
+    def test_empty_file_detected_as_utf8(self):
+        """Empty file should be detected as utf-8 (pure ASCII)."""
+        path = self._write_temp(b'')
+        try:
+            # Empty file: no BOM, no null (not binary), decodes as ascii
+            self.assertEqual(eu.detect_encoding(path), 'utf-8')
+        finally:
+            os.unlink(path)
+
+    def test_ascii_only_detected_as_utf8(self):
+        """Pure ASCII content should be detected as utf-8."""
+        path = self._write_temp(b'int main() { return 0; }\n')
+        try:
+            self.assertEqual(eu.detect_encoding(path), 'utf-8')
+        finally:
+            os.unlink(path)
+
+    def test_read_utf16_le_bom_without_bom_in_file(self):
+        """Reading as utf-16-le-bom when file has no BOM should still work."""
+        text = u'no bom here'
+        raw = text.encode('utf-16-le')  # no BOM prefix
+        path = self._write_temp(raw)
+        try:
+            # Should decode without error (no BOM to skip)
+            result = eu.read_with_encoding(path, 'utf-16-le-bom', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_write_read_windows_1251(self):
+        """Windows-1251 (Cyrillic) write+read roundtrip."""
+        text = u'Привет'  # Привет
+        fd, path = tempfile.mkstemp(suffix='.txt')
+        os.close(fd)
+        try:
+            eu.write_with_encoding(path, text, 'windows-1251', newline='')
+            result = eu.read_with_encoding(path, 'windows-1251', newline='')
+            self.assertEqual(result, text)
+        finally:
+            os.unlink(path)
+
+    def test_cmd_read_binary_rejected(self):
+        """cmd_read on binary file should return error."""
+        path = self._write_temp(b'PK\x03\x04' + b'\x00' * 100)
+        try:
+            saved_stderr = sys.stderr
+            try:
+                sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
+                Args = type('Args', (), {'file': path, 'encoding': None})
+                ret = eu.cmd_read(Args())
+                self.assertEqual(ret, 1)
+            finally:
+                sys.stderr = saved_stderr
+        finally:
+            os.unlink(path)
+
+    def test_cmd_convert_binary_rejected(self):
+        """cmd_convert on binary file should return error."""
+        path = self._write_temp(b'PK\x03\x04' + b'\x00' * 100)
+        try:
+            saved_stderr = sys.stderr
+            try:
+                sys.stderr = io.StringIO() if sys.version_info[0] >= 3 else __import__('StringIO').StringIO()
+                Args = type('Args', (), {'file': path, 'to': 'utf-8', 'encoding': None})
+                ret = eu.cmd_convert(Args())
+                self.assertEqual(ret, 1)
+            finally:
+                sys.stderr = saved_stderr
+        finally:
+            os.unlink(path)
+
+
+if __name__ == '__main__':
+    unittest.main()

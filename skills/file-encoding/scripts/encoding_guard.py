@@ -46,7 +46,7 @@ def _sys_ansi_enc():
                 return 'shift-jis'
             if n in ('cp949', 'euckr', 'ksc56011987'):
                 return 'euc-kr'
-            if n in ('cp950', 'big5', 'big5hkscs', 'big5hkscs'):
+            if n in ('cp950', 'big5', 'big5hkscs'):
                 return 'big5'
             if n in ('cp1251', 'windows1251'):
                 return 'windows-1251'
@@ -264,7 +264,7 @@ def main():
             _block(
                 '[encoding_guard] BLOCKED: {path} (encoding: {enc})\n'
                 '$EU = {utils}\n'
-                '  python $EU safe-edit "{path}" --old "OLD" --new "NEW"\n'
+                '  echo \'{{"old":"...","new":"..."}}\' | python $EU safe-edit "{path}"\n'
                 '  python $EU read "{path}" > tmp.txt && '
                 'python $EU write "{path}" --enc {enc} < tmp.txt'.format(
                     path=file_path, enc=encoding, utils=_ENCODING_UTILS,

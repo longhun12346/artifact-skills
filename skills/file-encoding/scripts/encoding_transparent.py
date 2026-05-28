@@ -1,0 +1,385 @@
+# -*- coding: utf-8 -*-
+"""encoding_transparent.py - Transparent encoding hook for Claude Code.
+
+Makes non-UTF-8 files editable by Claude Code's native Edit/Write/Read tools
+without any special commands or encoding awareness from Claude.
+
+How it works:
+  PreToolUse:  Detects encoding; if non-UTF-8, converts file to UTF-8 in place
+               and saves original encoding to a state file.
+  PostToolUse: Reads state file; converts file back from UTF-8 to original encoding.
+  Recover:     Scans for leftover state files (from crashes) and restores files.
+
+Hook configuration in ~/.claude/settings.json:
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Edit|Write|Read",
+      "hooks": [{"type": "command",
+        "command": "python encoding_transparent.py pre"}]
+    }],
+    "PostToolUse": [{
+      "matcher": "Edit|Write|Read",
+      "hooks": [{"type": "command",
+        "command": "python encoding_transparent.py post"}]
+    }]
+  }
+}
+
+Exit codes:
+  0 - allow tool call (PreToolUse) / success (PostToolUse)
+  2 - block tool call (only used if conversion fails critically)
+"""
+
+from __future__ import print_function
+
+import hashlib
+import io
+import json
+import os
+import sys
+import tempfile
+import time
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+MONITORED_EXTENSIONS = {
+    '.cpp', '.h', '.hpp', '.c', '.cc', '.cxx',
+    '.rc', '.bat', '.nsi', '.ini', '.xml',
+}
+
+# Encodings that Claude's tools handle natively — no conversion needed.
+SAFE_ENCODINGS = {
+    'utf-8', 'ascii', 'binary',
+    # Single-byte western encodings: chardet often reports these as false
+    # positives on near-ASCII UTF-8 content.  Even if genuinely windows-1252,
+    # Claude's tools can read/write them without garbling (bytes < 0x80 are
+    # identical to ASCII, and high bytes are rare in source code).
+    'windows-1252', 'windows-1250', 'windows-1253', 'windows-1254',
+    'windows-1255', 'windows-1256', 'windows-1257', 'windows-1258',
+    'iso-8859-1', 'iso-8859-2',
+}
+
+# Project root markers
+_PROJECT_MARKERS = ['.git', '.svn', '.hg', 'CMakeLists.txt', 'setup.py', 'pyproject.toml']
+_PROJECT_MARKER_EXTS = frozenset(['.vcxproj', '.sln'])
+
+# State directory for tracking files currently in UTF-8 temporary state
+STATE_DIR = os.path.join(tempfile.gettempdir(), 'claude-encoding-hook-state')
+
+# Set ENCODING_TRANSPARENT_DEBUG=1 for stderr diagnostics
+_DEBUG = os.environ.get('ENCODING_TRANSPARENT_DEBUG') == '1'
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_eu = None
+
+
+def _get_eu():
+    """Lazy-import encoding_utils from sibling module."""
+    global _eu
+    if _eu is None:
+        if _SCRIPT_DIR not in sys.path:
+            sys.path.insert(0, _SCRIPT_DIR)
+        import encoding_utils
+        _eu = encoding_utils
+    return _eu
+
+
+def _debug(msg):
+    if _DEBUG:
+        sys.stderr.write('[encoding_transparent] %s\n' % msg)
+
+
+def _state_path(filepath):
+    """Return the state file path for a given source file."""
+    abspath = os.path.abspath(filepath)
+    # Use MD5 of absolute path as filename (safe for filesystem)
+    h = hashlib.md5(abspath.encode('utf-8')).hexdigest()
+    return os.path.join(STATE_DIR, h + '.json')
+
+
+def _save_state(filepath, encoding):
+    """Save conversion state: records that filepath was converted to UTF-8."""
+    if not os.path.isdir(STATE_DIR):
+        os.makedirs(STATE_DIR)
+    state = {
+        'path': os.path.abspath(filepath),
+        'encoding': encoding,
+        'timestamp': time.time(),
+    }
+    state_file = _state_path(filepath)
+    json_str = json.dumps(state, ensure_ascii=False)
+    # Python 2: json.dumps returns bytes; decode for io.open(encoding='utf-8')
+    if isinstance(json_str, bytes):
+        json_str = json_str.decode('utf-8')
+    with io.open(state_file, 'w', encoding='utf-8') as f:
+        f.write(json_str)
+    _debug('State saved: %s -> %s' % (filepath, encoding))
+
+
+def _load_state(filepath):
+    """Load conversion state. Returns dict or None."""
+    state_file = _state_path(filepath)
+    if not os.path.exists(state_file):
+        return None
+    try:
+        with io.open(state_file, 'r', encoding='utf-8') as f:
+            return json.loads(f.read())
+    except (IOError, ValueError):
+        return None
+
+
+def _remove_state(filepath):
+    """Remove state file for filepath."""
+    state_file = _state_path(filepath)
+    try:
+        os.remove(state_file)
+        _debug('State removed: %s' % filepath)
+    except OSError:
+        pass
+
+
+def _in_project(filepath):
+    """Return True if filepath sits under a recognised project root."""
+    d = os.path.dirname(os.path.abspath(filepath))
+    _scandir = getattr(os, 'scandir', None)
+    while True:
+        for marker in _PROJECT_MARKERS:
+            if os.path.exists(os.path.join(d, marker)):
+                return True
+        try:
+            if _scandir:
+                with _scandir(d) as it:
+                    for entry in it:
+                        if os.path.splitext(entry.name)[1].lower() in _PROJECT_MARKER_EXTS:
+                            return True
+            else:
+                for name in os.listdir(d):
+                    if os.path.splitext(name)[1].lower() in _PROJECT_MARKER_EXTS:
+                        return True
+        except OSError:
+            pass
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def _convert_to_utf8(filepath, encoding):
+    """Convert file from `encoding` to plain UTF-8 in place.
+
+    Returns True on success, False on failure.
+    """
+    eu = _get_eu()
+
+    try:
+        content = eu.read_with_encoding(filepath, encoding, newline='')
+    except (IOError, UnicodeDecodeError) as e:
+        _debug('Failed to read %s as %s: %s' % (filepath, encoding, e))
+        return False
+
+    try:
+        with io.open(filepath, 'w', encoding='utf-8', newline='') as f:
+            f.write(content)
+    except (IOError, UnicodeEncodeError) as e:
+        _debug('Failed to write %s as UTF-8: %s' % (filepath, e))
+        return False
+
+    _debug('Converted %s: %s -> utf-8' % (filepath, encoding))
+    return True
+
+
+def _convert_from_utf8(filepath, encoding):
+    """Convert file from UTF-8 back to `encoding` in place.
+
+    Returns True on success, False on failure.
+    """
+    eu = _get_eu()
+
+    try:
+        with io.open(filepath, 'r', encoding='utf-8', newline='') as f:
+            content = f.read()
+    except (IOError, UnicodeDecodeError) as e:
+        _debug('Failed to read %s as UTF-8: %s' % (filepath, e))
+        return False
+
+    try:
+        eu.write_with_encoding(filepath, content, encoding, newline='')
+    except (IOError, UnicodeEncodeError) as e:
+        _debug('Failed to write %s as %s: %s' % (filepath, encoding, e))
+        return False
+
+    _debug('Converted %s: utf-8 -> %s' % (filepath, encoding))
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Hook handlers
+# ---------------------------------------------------------------------------
+
+def handle_pre(tool_name, tool_input):
+    """PreToolUse handler: convert non-UTF-8 files to UTF-8 before tool runs."""
+    file_path = tool_input.get('file_path', '')
+    if not file_path:
+        return
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in MONITORED_EXTENSIONS:
+        return
+
+    if not _in_project(file_path):
+        return
+
+    # File doesn't exist yet (Write creating new file) — let it through
+    if not os.path.exists(file_path):
+        return
+
+    # Already converted by a previous Pre call (e.g. Read followed by Edit)
+    state = _load_state(file_path)
+    if state is not None:
+        _debug('Already converted (state exists): %s' % file_path)
+        return
+
+    # Detect encoding
+    eu = _get_eu()
+    encoding = eu.detect_encoding(file_path)
+
+    if not encoding or encoding in SAFE_ENCODINGS:
+        return
+
+    # Non-UTF-8: convert to UTF-8 and save state
+    if _convert_to_utf8(file_path, encoding):
+        _save_state(file_path, encoding)
+    else:
+        # Conversion failed — block the tool call so Claude knows
+        msg = ('[encoding_transparent] ERROR: failed to convert %s (%s -> utf-8). '
+               'File may be corrupted or locked.' % (file_path, encoding))
+        print(msg)
+        sys.exit(2)
+
+
+def handle_post(tool_name, tool_input):
+    """PostToolUse handler: convert file back from UTF-8 to original encoding."""
+    file_path = tool_input.get('file_path', '')
+    if not file_path:
+        return
+
+    # Check if we have state for this file (meaning Pre converted it)
+    state = _load_state(file_path)
+    if state is None:
+        return
+
+    encoding = state['encoding']
+
+    if not os.path.exists(file_path):
+        # File was deleted by the tool — just clean up state
+        _remove_state(file_path)
+        return
+
+    if _convert_from_utf8(file_path, encoding):
+        _remove_state(file_path)
+    else:
+        # Conversion back failed — leave state file for recovery
+        _debug('WARNING: failed to convert %s back to %s' % (file_path, encoding))
+
+
+def handle_recover():
+    """Recovery handler: restore any files left in UTF-8 state from crashes."""
+    if not os.path.isdir(STATE_DIR):
+        print('No state files found.')
+        return
+
+    state_files = [f for f in os.listdir(STATE_DIR) if f.endswith('.json')]
+    if not state_files:
+        print('No state files found.')
+        return
+
+    recovered = 0
+    failed = 0
+    for fname in state_files:
+        state_path = os.path.join(STATE_DIR, fname)
+        try:
+            with io.open(state_path, 'r', encoding='utf-8') as f:
+                state = json.loads(f.read())
+        except (IOError, ValueError):
+            continue
+
+        filepath = state.get('path', '')
+        encoding = state.get('encoding', '')
+        if not filepath or not encoding:
+            os.remove(state_path)
+            continue
+
+        if not os.path.exists(filepath):
+            # File no longer exists — clean up state
+            os.remove(state_path)
+            continue
+
+        # Try to convert back
+        if _convert_from_utf8(filepath, encoding):
+            os.remove(state_path)
+            recovered += 1
+            print('Recovered: %s -> %s' % (filepath, encoding))
+        else:
+            failed += 1
+            print('FAILED to recover: %s (encoding: %s)' % (filepath, encoding))
+
+    if recovered == 0 and failed == 0:
+        print('No files needed recovery.')
+    else:
+        print('Recovery complete: %d restored, %d failed' % (recovered, failed))
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write('Usage: encoding_transparent.py <pre|post|recover>\n')
+        sys.exit(1)
+
+    mode = sys.argv[1]
+
+    if mode == 'recover':
+        handle_recover()
+        sys.exit(0)
+
+    # Pre and Post modes read hook data from stdin
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw)
+    except (ValueError, IOError):
+        # Malformed input — fail open
+        sys.exit(0)
+
+    tool_name = data.get('tool_name', '')
+    tool_input = data.get('tool_input', {})
+
+    if tool_name not in ('Edit', 'Write', 'Read'):
+        sys.exit(0)
+
+    try:
+        if mode == 'pre':
+            handle_pre(tool_name, tool_input)
+        elif mode == 'post':
+            handle_post(tool_name, tool_input)
+        else:
+            sys.stderr.write('Unknown mode: %s\n' % mode)
+            sys.exit(1)
+    except Exception as e:
+        # Fail-open: any unexpected error allows the tool call through
+        _debug('Unexpected error: %s' % e)
+        sys.exit(0)
+
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()
