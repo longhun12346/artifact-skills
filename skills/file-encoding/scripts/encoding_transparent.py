@@ -285,8 +285,15 @@ def handle_post(tool_name, tool_input):
     if _convert_from_utf8(file_path, encoding):
         _remove_state(file_path)
     else:
-        # Conversion back failed — leave state file for recovery
-        _debug('WARNING: failed to convert %s back to %s' % (file_path, encoding))
+        # Conversion back failed — file stays as UTF-8.
+        # Output warning to stderr so Claude and the user are informed.
+        _remove_state(file_path)
+        msg = ('[encoding_transparent] WARNING: could not convert %s back to %s. '
+               'File now remains as UTF-8 (likely contains characters not representable in %s).'
+               % (file_path, encoding, encoding))
+        sys.stderr.write(msg + '\n')
+        # Also print to stdout so Claude sees it in hook output
+        print(msg)
 
 
 def handle_recover():
