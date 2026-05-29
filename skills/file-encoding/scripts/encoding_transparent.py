@@ -62,10 +62,6 @@ SAFE_ENCODINGS = {
     'iso-8859-1', 'iso-8859-2',
 }
 
-# Project root markers
-_PROJECT_MARKERS = ['.git', '.svn', '.hg', 'CMakeLists.txt', 'setup.py', 'pyproject.toml']
-_PROJECT_MARKER_EXTS = frozenset(['.vcxproj', '.sln'])
-
 # State directory for tracking files currently in UTF-8 temporary state
 STATE_DIR = os.path.join(tempfile.gettempdir(), 'claude-encoding-hook-state')
 
@@ -145,30 +141,6 @@ def _remove_state(filepath):
         pass
 
 
-def _in_project(filepath):
-    """Return True if filepath sits under a recognised project root."""
-    d = os.path.dirname(os.path.abspath(filepath))
-    _scandir = getattr(os, 'scandir', None)
-    while True:
-        for marker in _PROJECT_MARKERS:
-            if os.path.exists(os.path.join(d, marker)):
-                return True
-        try:
-            if _scandir:
-                with _scandir(d) as it:
-                    for entry in it:
-                        if os.path.splitext(entry.name)[1].lower() in _PROJECT_MARKER_EXTS:
-                            return True
-            else:
-                for name in os.listdir(d):
-                    if os.path.splitext(name)[1].lower() in _PROJECT_MARKER_EXTS:
-                        return True
-        except OSError:
-            pass
-        parent = os.path.dirname(d)
-        if parent == d:
-            return False
-        d = parent
 
 
 def _convert_to_utf8(filepath, encoding):
@@ -231,9 +203,6 @@ def handle_pre(tool_name, tool_input):
 
     ext = os.path.splitext(file_path)[1].lower()
     if ext not in MONITORED_EXTENSIONS:
-        return
-
-    if not _in_project(file_path):
         return
 
     # File doesn't exist yet (Write creating new file) — let it through

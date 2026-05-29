@@ -188,9 +188,8 @@ class TestPreToolUseConversion(unittest.TestCase):
         state = encoding_transparent._load_state(filepath)
         self.assertIsNone(state)
 
-    def test_file_outside_project_skipped(self):
-        """Files outside project roots should pass through."""
-        # Create file in temp dir without .git marker
+    def test_file_outside_project_still_converted(self):
+        """Files outside project roots should still be converted (no project check)."""
         tmp = tempfile.mkdtemp(prefix='enc_no_project_')
         try:
             filepath = os.path.join(tmp, 'test.cpp')
@@ -199,14 +198,12 @@ class TestPreToolUseConversion(unittest.TestCase):
             rc, stdout, stderr = _run_hook('pre', 'Edit', filepath)
             self.assertEqual(rc, 0)
 
-            # Should NOT be converted (no project root)
+            # Should be converted (project check removed)
             state = encoding_transparent._load_state(filepath)
-            self.assertIsNone(state)
-
-            # File should still be GBK
-            raw = _read_file_bytes(filepath)
-            self.assertEqual(raw, _make_gbk_content())
+            self.assertIsNotNone(state)
         finally:
+            # Clean up state
+            encoding_transparent._remove_state(filepath)
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_new_file_write_passes_through(self):
