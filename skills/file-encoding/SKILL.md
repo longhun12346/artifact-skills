@@ -97,7 +97,7 @@ python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --uninstall  # remove hooks
 
 1. **New files default to UTF-8** — Write creates files as UTF-8. If the project requires GBK/other encoding for new `.cpp`/`.h` files, you must explicitly use `encoding_utils.py safe-write --enc`.
 
-2. **Concurrent sessions** — If two Claude sessions edit the same non-UTF-8 file simultaneously, state files may conflict. In practice this is rare (one session per project).
+2. **Concurrent sessions** — File locking prevents state corruption, but two sessions converting the same file simultaneously may still produce unexpected results. In practice this is rare (one session per project).
 
 3. **Process kill without PostToolUse** — If Claude Code is forcefully killed between Pre and Post, the file remains in temporary UTF-8 state. Run `encoding_transparent.py recover` to restore, or the file will stay UTF-8 until the next Pre/Post cycle.
 
