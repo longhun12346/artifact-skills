@@ -1,7 +1,7 @@
 ---
 name: file-encoding
 description: Transparent encoding handling for Windows C++ projects. Automatically converts non-UTF-8 files (ANSI/GBK/UTF-8 BOM/UTF-16 LE BOM) before Edit/Write/Read and restores encoding after — no special commands needed.
-version: 2.0.0
+version: 2.1.0
 author: longhun12346
 license: MIT
 tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis, hook]
