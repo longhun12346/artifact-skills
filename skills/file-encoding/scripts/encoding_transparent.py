@@ -163,12 +163,17 @@ def _load_state(filepath):
 
 
 def _remove_state(filepath):
-    """Remove state file for filepath."""
+    """Remove state file and its lock file."""
     state_file = _state_path(filepath)
     try:
         with _FileLock(state_file):
             os.remove(state_file)
         _debug('State removed: %s' % filepath)
+    except OSError:
+        pass
+    # Clean up lock file
+    try:
+        os.remove(state_file + '.lock')
     except OSError:
         pass
 
@@ -221,6 +226,14 @@ def _convert_from_utf8(filepath, encoding):
 
     _debug('Converted %s: utf-8 -> %s' % (filepath, encoding))
     return True
+
+
+def _try_remove(path):
+    """Remove a file, ignoring errors if it doesn't exist."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +326,9 @@ def handle_recover():
     for fname in state_files:
         state_path = os.path.join(STATE_DIR, fname)
         try:
-            with io.open(state_path, 'r', encoding='utf-8') as f:
-                state = json.loads(f.read())
+            with _FileLock(state_path):
+                with io.open(state_path, 'r', encoding='utf-8') as f:
+                    state = json.loads(f.read())
         except (IOError, ValueError):
             continue
 
@@ -322,21 +336,30 @@ def handle_recover():
         encoding = state.get('encoding', '')
         if not filepath or not encoding:
             os.remove(state_path)
+            _try_remove(state_path + '.lock')
             continue
 
         if not os.path.exists(filepath):
-            # File no longer exists — clean up state
             os.remove(state_path)
+            _try_remove(state_path + '.lock')
             continue
 
         # Try to convert back
         if _convert_from_utf8(filepath, encoding):
             os.remove(state_path)
+            _try_remove(state_path + '.lock')
             recovered += 1
             print('Recovered: %s -> %s' % (filepath, encoding))
         else:
             failed += 1
             print('FAILED to recover: %s (encoding: %s)' % (filepath, encoding))
+
+    # Clean up any orphaned .lock files
+    for fname in os.listdir(STATE_DIR):
+        if fname.endswith('.lock'):
+            json_file = os.path.join(STATE_DIR, fname[:-5])
+            if not os.path.exists(json_file):
+                _try_remove(os.path.join(STATE_DIR, fname))
 
     if recovered == 0 and failed == 0:
         print('No files needed recovery.')

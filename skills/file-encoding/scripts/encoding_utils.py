@@ -36,12 +36,11 @@ _IS_WINDOWS = (os.name == 'nt')
 def _get_sys_encoding():
     """Get system ANSI encoding. Returns a valid Python encoding name."""
     try:
-        enc = locale.getdefaultlocale()[1]
-        if enc:
-            return enc
+        if sys.version_info >= (3, 11):
+            return locale.getencoding()
+        return locale.getpreferredencoding(False) or 'utf-8'
     except (ValueError, TypeError):
-        pass
-    return 'utf-8'
+        return 'utf-8'
 
 
 
