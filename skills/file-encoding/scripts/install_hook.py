@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""setup.py - Install or uninstall the encoding_transparent hook.
+"""install_hook.py - Install or uninstall the encoding_transparent hook.
 
 Modifies ~/.claude/settings.json to register encoding_transparent.py as
 PreToolUse + PostToolUse hooks that transparently handle file encoding.
 
 Usage:
-  python setup.py             # install hooks
-  python setup.py --uninstall # remove hooks (also removes old encoding_guard if present)
-  python setup.py --check     # print current status, exit 0=installed 1=not installed
+  python install_hook.py             # install hooks
+  python install_hook.py --uninstall # remove hooks (also removes old encoding_guard if present)
+  python install_hook.py --check     # print current status, exit 0=installed 1=not installed
 
 Compatible with Python 2.6+ and 3.x.
 """
@@ -166,7 +166,7 @@ def check(settings):
         print('INSTALLED: encoding_transparent hooks active in {}'.format(_SETTINGS_PATH))
         sys.exit(0)
     elif _has_marker(settings, 'PreToolUse', _OLD_MARKER):
-        print('OLD VERSION: encoding_guard (blocking) hook found. Run setup.py to upgrade.')
+        print('OLD VERSION: encoding_guard (blocking) hook found. Run install_hook.py to upgrade.')
         sys.exit(1)
     else:
         print('NOT INSTALLED: no encoding hooks found in {}'.format(_SETTINGS_PATH))

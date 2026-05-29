@@ -41,6 +41,11 @@ import sys
 import tempfile
 import time
 
+if os.name == 'nt':
+    import msvcrt
+else:
+    import fcntl
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -92,11 +97,36 @@ def _debug(msg):
         sys.stderr.write('[encoding_transparent] %s\n' % msg)
 
 
+class _FileLock(object):
+    """Cross-platform file lock context manager."""
+
+    def __init__(self, path):
+        self._path = path + '.lock'
+        self._f = None
+
+    def __enter__(self):
+        if not os.path.isdir(os.path.dirname(self._path)):
+            os.makedirs(os.path.dirname(self._path))
+        self._f = open(self._path, 'w')
+        if os.name == 'nt':
+            msvcrt.locking(self._f.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(self._f.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *args):
+        if self._f:
+            if os.name == 'nt':
+                msvcrt.locking(self._f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(self._f.fileno(), fcntl.LOCK_UN)
+            self._f.close()
+
+
 def _state_path(filepath):
     """Return the state file path for a given source file."""
     abspath = os.path.abspath(filepath)
-    # Use MD5 of absolute path as filename (safe for filesystem)
-    h = hashlib.md5(abspath.encode('utf-8')).hexdigest()
+    h = hashlib.sha256(abspath.encode('utf-8')).hexdigest()
     return os.path.join(STATE_DIR, h + '.json')
 
 
@@ -111,11 +141,11 @@ def _save_state(filepath, encoding):
     }
     state_file = _state_path(filepath)
     json_str = json.dumps(state, ensure_ascii=False)
-    # Python 2: json.dumps returns bytes; decode for io.open(encoding='utf-8')
     if isinstance(json_str, bytes):
         json_str = json_str.decode('utf-8')
-    with io.open(state_file, 'w', encoding='utf-8') as f:
-        f.write(json_str)
+    with _FileLock(state_file):
+        with io.open(state_file, 'w', encoding='utf-8') as f:
+            f.write(json_str)
     _debug('State saved: %s -> %s' % (filepath, encoding))
 
 
@@ -125,8 +155,9 @@ def _load_state(filepath):
     if not os.path.exists(state_file):
         return None
     try:
-        with io.open(state_file, 'r', encoding='utf-8') as f:
-            return json.loads(f.read())
+        with _FileLock(state_file):
+            with io.open(state_file, 'r', encoding='utf-8') as f:
+                return json.loads(f.read())
     except (IOError, ValueError):
         return None
 
@@ -135,7 +166,8 @@ def _remove_state(filepath):
     """Remove state file for filepath."""
     state_file = _state_path(filepath)
     try:
-        os.remove(state_file)
+        with _FileLock(state_file):
+            os.remove(state_file)
         _debug('State removed: %s' % filepath)
     except OSError:
         pass
@@ -351,7 +383,7 @@ def main():
             sys.exit(1)
     except Exception as e:
         # Fail-open: any unexpected error allows the tool call through
-        _debug('Unexpected error: %s' % e)
+        sys.stderr.write('[encoding_transparent] Unexpected error (fail-open): %s\n' % e)
         sys.exit(0)
 
     sys.exit(0)

@@ -22,7 +22,6 @@ This skill installs **transparent hooks** that handle file encoding automaticall
 ## When it activates
 
 - Only on monitored extensions: `.cpp` `.h` `.hpp` `.c` `.cc` `.cxx` `.rc` `.bat` `.nsi` `.ini` `.xml`
-- Only inside project roots (`.git` / `.svn` / `.hg` / `CMakeLists.txt` / `*.vcxproj` / `*.sln`)
 - Only when encoding is non-UTF-8 (GBK, Shift-JIS, EUC-KR, Big5, UTF-8 BOM, UTF-16 LE BOM)
 - UTF-8 files pass through with minimal overhead (~70ms subprocess startup)
 
@@ -89,9 +88,9 @@ python ${CLAUDE_SKILL_DIR}/scripts/encoding_transparent.py recover
 ## Installation
 
 ```bash
-python ${CLAUDE_SKILL_DIR}/scripts/setup.py           # install hooks
-python ${CLAUDE_SKILL_DIR}/scripts/setup.py --check   # verify installation
-python ${CLAUDE_SKILL_DIR}/scripts/setup.py --uninstall  # remove hooks
+python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py           # install hooks
+python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --check   # verify installation
+python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --uninstall  # remove hooks
 ```
 
 ## Limitations
