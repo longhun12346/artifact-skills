@@ -317,6 +317,8 @@ def handle_pre(tool_name, tool_input):
     # Non-UTF-8: convert to UTF-8 and save state
     if _convert_to_utf8(file_path, encoding):
         _save_state(file_path, encoding)
+        print('[encoding] Converted %s from %s to UTF-8 for editing. '
+              'Avoid characters outside %s charset.' % (file_path, encoding, encoding))
     else:
         # Conversion failed — block the tool call so Claude knows
         msg = ('[encoding_transparent] ERROR: failed to convert %s (%s -> utf-8). '
