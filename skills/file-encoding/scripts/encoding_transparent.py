@@ -46,6 +46,22 @@ if os.name == 'nt':
 else:
     import fcntl
 
+
+def _atomic_replace(src, dst):
+    """Atomically replace dst with src. Best-effort on Windows + Py2."""
+    if hasattr(os, 'replace'):
+        os.replace(src, dst)
+    elif os.name == 'nt':
+        # Windows Py2: no atomic replace available
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        os.rename(src, dst)
+    else:
+        # POSIX: os.rename atomically replaces existing target
+        os.rename(src, dst)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -191,7 +207,7 @@ def _atomic_write(filepath, data, encoding='utf-8', newline=''):
     try:
         with io.open(fd, 'w', encoding=encoding, newline=newline) as f:
             f.write(data)
-        os.replace(tmp_path, filepath)
+        _atomic_replace(tmp_path, filepath)
     except BaseException:
         _try_remove(tmp_path)
         raise
@@ -248,7 +264,7 @@ def _convert_from_utf8(filepath, encoding):
     try:
         os.close(fd)
         eu.write_with_encoding(tmp_path, content, encoding, newline='')
-        os.replace(tmp_path, filepath)
+        _atomic_replace(tmp_path, filepath)
     except (IOError, UnicodeEncodeError, OSError) as e:
         _try_remove(tmp_path)
         _debug('Failed to write %s as %s: %s' % (filepath, encoding, e))
