@@ -179,7 +179,7 @@ def _load_state(filepath):
 
 
 def _remove_state(filepath):
-    """Remove state file and its lock file."""
+    """Remove state file, backup, and lock file."""
     state_file = _state_path(filepath)
     try:
         with _FileLock(state_file):
@@ -187,11 +187,9 @@ def _remove_state(filepath):
         _debug('State removed: %s' % filepath)
     except OSError:
         pass
-    # Clean up lock file
-    try:
-        os.remove(state_file + '.lock')
-    except OSError:
-        pass
+    # Clean up backup and lock files
+    _try_remove(_backup_path(filepath))
+    _try_remove(state_file + '.lock')
 
 
 
@@ -213,16 +211,30 @@ def _atomic_write(filepath, data, encoding='utf-8', newline=''):
         raise
 
 
+def _backup_path(filepath):
+    """Return the path for storing original bytes backup."""
+    return _state_path(filepath) + '.backup'
+
+
 def _convert_to_utf8(filepath, encoding):
     """Convert file from `encoding` to plain UTF-8 atomically.
 
     Returns True on success, False on failure.
     Preserves the file's original mtime so that tools (e.g. Edit) don't detect
     a spurious modification after a Pre-hook conversion.
+    Saves a backup of original raw bytes for recovery if Post fails.
     """
     eu = _get_eu()
 
     orig_mtime = os.path.getmtime(filepath)
+
+    # Save original bytes as backup BEFORE conversion
+    try:
+        with open(filepath, 'rb') as f:
+            original_bytes = f.read()
+    except IOError as e:
+        _debug('Failed to read %s for backup: %s' % (filepath, e))
+        return False
 
     try:
         content = eu.read_with_encoding(filepath, encoding, newline='')
@@ -235,6 +247,17 @@ def _convert_to_utf8(filepath, encoding):
     except (IOError, UnicodeEncodeError) as e:
         _debug('Failed to write %s as UTF-8: %s' % (filepath, e))
         return False
+
+    # Save backup after successful conversion
+    backup = _backup_path(filepath)
+    if not os.path.isdir(STATE_DIR):
+        os.makedirs(STATE_DIR)
+    try:
+        with open(backup, 'wb') as f:
+            f.write(original_bytes)
+    except IOError as e:
+        _debug('Failed to write backup for %s: %s' % (filepath, e))
+        # Non-fatal: conversion succeeded, just no backup available
 
     os.utime(filepath, (orig_mtime, orig_mtime))
     _debug('Converted %s: %s -> utf-8' % (filepath, encoding))
@@ -327,6 +350,52 @@ def handle_pre(tool_name, tool_input):
         sys.exit(2)
 
 
+def _infer_sibling_encoding(filepath):
+    """Infer encoding from sibling files with the same extension.
+
+    Scans up to 5 sibling files in the same directory. Returns the encoding
+    if a majority agree, or None if no consensus or no siblings.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    dirpath = os.path.dirname(os.path.abspath(filepath))
+    basename = os.path.basename(filepath)
+    eu = _get_eu()
+
+    try:
+        entries = os.listdir(dirpath)
+    except OSError:
+        return None
+
+    siblings = [e for e in entries
+                if os.path.splitext(e)[1].lower() == ext and e != basename]
+    # Sample up to 5
+    siblings = siblings[:5]
+    if not siblings:
+        return None
+
+    encodings = []
+    for name in siblings:
+        path = os.path.join(dirpath, name)
+        if os.path.isfile(path):
+            try:
+                enc = eu.detect_encoding(path)
+                if enc and enc not in SAFE_ENCODINGS and enc != 'binary':
+                    encodings.append(enc)
+            except Exception:
+                pass
+
+    if not encodings:
+        return None
+
+    # Return most common non-safe encoding
+    from collections import Counter
+    most_common = Counter(encodings).most_common(1)[0]
+    # Only trust if at least 2 siblings agree, or if there's only 1 sibling
+    if most_common[1] >= 2 or len(siblings) == 1:
+        return most_common[0]
+    return None
+
+
 def handle_post(tool_name, tool_input):
     """PostToolUse handler: convert file back from UTF-8 to original encoding."""
     file_path = tool_input.get('file_path', '')
@@ -336,6 +405,17 @@ def handle_post(tool_name, tool_input):
     # Check if we have state for this file (meaning Pre converted it)
     state = _load_state(file_path)
     if state is None:
+        # No state: possibly a new file created by Write.
+        # Check if we should convert it to match sibling encoding.
+        if tool_name == 'Write' and os.path.exists(file_path):
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in MONITORED_EXTENSIONS:
+                sibling_enc = _infer_sibling_encoding(file_path)
+                if sibling_enc:
+                    if _convert_from_utf8(file_path, sibling_enc):
+                        print('[encoding] New file %s converted to %s '
+                              '(inherited from sibling files).'
+                              % (file_path, sibling_enc))
         return
 
     encoding = state['encoding']
@@ -348,14 +428,30 @@ def handle_post(tool_name, tool_input):
     if _convert_from_utf8(file_path, encoding):
         _remove_state(file_path)
     else:
-        # Conversion back failed — file stays as UTF-8.
-        # Output warning to stderr so Claude and the user are informed.
-        _remove_state(file_path)
-        msg = ('[encoding_transparent] WARNING: could not convert %s back to %s. '
-               'File now remains as UTF-8 (likely contains characters not representable in %s).'
-               % (file_path, encoding, encoding))
+        # Conversion back failed — try to restore from backup
+        backup = _backup_path(file_path)
+        if os.path.exists(backup):
+            try:
+                with open(backup, 'rb') as f:
+                    original_bytes = f.read()
+                with open(file_path, 'wb') as f:
+                    f.write(original_bytes)
+                _remove_state(file_path)
+                msg = ('[encoding_transparent] WARNING: could not convert %s back to %s '
+                       '(likely contains characters not in %s charset). '
+                       'Restored original file from backup — your edits were LOST.'
+                       % (file_path, encoding, encoding))
+            except IOError:
+                _remove_state(file_path)
+                msg = ('[encoding_transparent] WARNING: could not convert %s back to %s '
+                       'and backup restore also failed. File remains as UTF-8.'
+                       % (file_path, encoding))
+        else:
+            _remove_state(file_path)
+            msg = ('[encoding_transparent] WARNING: could not convert %s back to %s. '
+                   'No backup available. File remains as UTF-8.'
+                   % (file_path, encoding))
         sys.stderr.write(msg + '\n')
-        # Also print to stdout so Claude sees it in hook output
         print(msg)
 
 

@@ -16,13 +16,23 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.8', '3.11', '3.12']
+        chardet: [true]
+        include:
+          - os: windows-latest
+            python-version: '3.11'
+            chardet: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
+      - name: Install dependencies (with chardet)
+        if: matrix.chardet
         run: pip install -r skills/file-encoding/requirements.txt
+      - name: Verify no chardet (heuristic-only mode)
+        if: "!matrix.chardet"
+        run: python -c "try:\n import chardet\n raise SystemExit('chardet should not be installed')\nexcept ImportError:\n print('OK: chardet not installed')"
+        shell: bash
       - name: Run tests
         working-directory: skills/file-encoding/scripts
         run: python -m unittest discover -s . -p "test_*.py" -v

@@ -675,5 +675,107 @@ class TestEdgeCases(unittest.TestCase):
         self.assertIsNone(state)
 
 
+class TestPostFailureRecovery(unittest.TestCase):
+    """Test automatic recovery when Post conversion fails."""
+
+    def setUp(self):
+        self.project_dir = _create_temp_project()
+        if os.path.isdir(encoding_transparent.STATE_DIR):
+            shutil.rmtree(encoding_transparent.STATE_DIR)
+
+    def tearDown(self):
+        shutil.rmtree(self.project_dir, ignore_errors=True)
+        if os.path.isdir(encoding_transparent.STATE_DIR):
+            shutil.rmtree(encoding_transparent.STATE_DIR)
+
+    def test_post_failure_restores_from_backup(self):
+        """If Post can't encode back, file should be restored from backup."""
+        filepath = os.path.join(self.project_dir, 'fail.cpp')
+        original = u'// 测试文件\nint x = 1;\n'
+        original_bytes = original.encode('gbk')
+        _write_file_bytes(filepath, original_bytes)
+
+        # Pre: convert to UTF-8
+        _run_hook('pre', 'Edit', filepath)
+
+        # Simulate Claude writing emoji (not representable in GBK)
+        bad_content = u'// 测试文件 \U0001f600\nint x = 1;\n'
+        _write_file_bytes(filepath, bad_content.encode('utf-8'))
+
+        # Post: should fail to encode, then restore from backup
+        rc, stdout, stderr = _run_hook('post', 'Edit', filepath)
+        self.assertEqual(rc, 0)
+        self.assertIn('WARNING', stdout)
+        self.assertIn('backup', stdout.lower())
+
+        # File should be restored to original GBK bytes
+        raw = _read_file_bytes(filepath)
+        self.assertEqual(raw, original_bytes)
+
+    def test_backup_cleaned_up_on_success(self):
+        """Backup file should be removed after successful Post."""
+        filepath = os.path.join(self.project_dir, 'clean.cpp')
+        _write_file_bytes(filepath, _make_gbk_content())
+
+        _run_hook('pre', 'Edit', filepath)
+        # Don't modify — Post should succeed
+        _run_hook('post', 'Edit', filepath)
+
+        # Backup should be cleaned up
+        backup = encoding_transparent._backup_path(filepath)
+        self.assertFalse(os.path.exists(backup))
+
+
+class TestNewFileEncodingInheritance(unittest.TestCase):
+    """Test that new files inherit encoding from sibling files."""
+
+    def setUp(self):
+        self.project_dir = _create_temp_project()
+        if os.path.isdir(encoding_transparent.STATE_DIR):
+            shutil.rmtree(encoding_transparent.STATE_DIR)
+
+    def tearDown(self):
+        shutil.rmtree(self.project_dir, ignore_errors=True)
+        if os.path.isdir(encoding_transparent.STATE_DIR):
+            shutil.rmtree(encoding_transparent.STATE_DIR)
+
+    def test_new_file_inherits_gbk_from_siblings(self):
+        """New .cpp file should inherit GBK encoding from sibling .cpp files."""
+        # Create 2 GBK sibling files
+        for name in ['a.cpp', 'b.cpp']:
+            path = os.path.join(self.project_dir, name)
+            _write_file_bytes(path, _make_gbk_content())
+
+        # Create new file (Write tool creates UTF-8)
+        new_file = os.path.join(self.project_dir, 'new.cpp')
+        new_content = u'// 新文件\nint z = 3;\n'
+        _write_file_bytes(new_file, new_content.encode('utf-8'))
+
+        # Post(Write): should detect siblings are GBK and convert
+        rc, stdout, stderr = _run_hook('post', 'Write', new_file)
+        self.assertEqual(rc, 0)
+        self.assertIn('inherited', stdout.lower())
+
+        # Verify file is now GBK
+        raw = _read_file_bytes(new_file)
+        decoded = raw.decode('gbk')
+        self.assertIn(u'新文件', decoded)
+
+    def test_new_file_no_siblings_stays_utf8(self):
+        """New file with no non-UTF-8 siblings should stay UTF-8."""
+        # No sibling files with same extension
+        new_file = os.path.join(self.project_dir, 'only.h')
+        content = u'#pragma once\n'
+        _write_file_bytes(new_file, content.encode('utf-8'))
+
+        # Post(Write): no siblings to inherit from
+        rc, stdout, stderr = _run_hook('post', 'Write', new_file)
+        self.assertEqual(rc, 0)
+
+        # File should remain UTF-8
+        raw = _read_file_bytes(new_file)
+        self.assertEqual(raw.decode('utf-8'), content)
+
+
 if __name__ == '__main__':
     unittest.main()

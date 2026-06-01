@@ -132,7 +132,8 @@ def detect_encoding(filepath):
     except UnicodeDecodeError:
         pass
 
-    # Try chardet, then heuristic
+    # Try chardet (best for CJK — uses language-specific n-gram models),
+    # then fall through to heuristic.
     try:
         import chardet
         result = chardet.detect(raw)
