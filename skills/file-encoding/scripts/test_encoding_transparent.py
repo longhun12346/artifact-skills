@@ -461,6 +461,77 @@ class TestFullRoundTrip(unittest.TestCase):
         self.assertIn('// added line', decoded)
 
 
+class TestWriteOverwrite(unittest.TestCase):
+    """Test Write tool overwriting existing non-UTF-8 files."""
+
+    def setUp(self):
+        self.project_dir = _create_temp_project()
+        if os.path.isdir(encoding_transparent.STATE_DIR):
+            shutil.rmtree(encoding_transparent.STATE_DIR)
+
+    def tearDown(self):
+        shutil.rmtree(self.project_dir, ignore_errors=True)
+        if os.path.isdir(encoding_transparent.STATE_DIR):
+            shutil.rmtree(encoding_transparent.STATE_DIR)
+
+    def test_write_overwrite_existing_gbk_file(self):
+        """Write tool completely replacing a GBK file should preserve encoding."""
+        filepath = os.path.join(self.project_dir, 'main.cpp')
+        _write_file_bytes(filepath, _make_gbk_content())
+
+        # Pre(Write): converts existing file to UTF-8
+        rc, _, _ = _run_hook('pre', 'Write', filepath)
+        self.assertEqual(rc, 0)
+
+        # Simulate Write tool: completely replace content with new UTF-8 text
+        new_content = u'// 全新内容\nint main() { return 42; }\n'
+        _write_file_bytes(filepath, new_content.encode('utf-8'))
+
+        # Post(Write): convert back to GBK
+        rc, _, _ = _run_hook('post', 'Write', filepath)
+        self.assertEqual(rc, 0)
+
+        # Verify file is GBK with entirely new content
+        raw = _read_file_bytes(filepath)
+        decoded = raw.decode('gbk')
+        self.assertIn(u'全新内容', decoded)
+        self.assertIn('return 42', decoded)
+        # Old content should be gone
+        self.assertNotIn(u'你好', decoded)
+
+        # State cleaned up
+        state = encoding_transparent._load_state(filepath)
+        self.assertIsNone(state)
+
+    def test_read_then_write_overwrite(self):
+        """Read followed by Write (full rewrite) should work correctly."""
+        filepath = os.path.join(self.project_dir, 'src.cpp')
+        original = u'// 原始代码\nint x = 1;\n'
+        _write_file_bytes(filepath, original.encode('gbk'))
+
+        # Cycle 1: Read
+        _run_hook('pre', 'Read', filepath)
+        # Claude reads the UTF-8 content
+        raw = _read_file_bytes(filepath)
+        read_content = raw.decode('utf-8')
+        self.assertIn(u'原始代码', read_content)
+        _run_hook('post', 'Read', filepath)
+
+        # Cycle 2: Write (complete replacement based on what was read)
+        _run_hook('pre', 'Write', filepath)
+        # Write tool replaces entire file with new content
+        new_content = read_content.replace(u'int x = 1', u'int x = 100') + u'// 追加注释\n'
+        _write_file_bytes(filepath, new_content.encode('utf-8'))
+        _run_hook('post', 'Write', filepath)
+
+        # Verify: GBK encoding, new content
+        raw = _read_file_bytes(filepath)
+        decoded = raw.decode('gbk')
+        self.assertIn(u'原始代码', decoded)
+        self.assertIn('int x = 100', decoded)
+        self.assertIn(u'追加注释', decoded)
+
+
 class TestRecovery(unittest.TestCase):
     """Test crash recovery mechanism."""
 

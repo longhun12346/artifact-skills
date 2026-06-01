@@ -17,7 +17,7 @@ This module is also imported by encoding_transparent.py (the hook) for its
 detect_encoding(), read_with_encoding(), write_with_encoding() functions.
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 import argparse
 import io

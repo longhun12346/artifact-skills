@@ -180,12 +180,33 @@ def _remove_state(filepath):
 
 
 
+def _atomic_write(filepath, data, encoding='utf-8', newline=''):
+    """Write data to filepath atomically via a temp file + os.replace.
+
+    Writes to a temporary file in the same directory, then atomically replaces
+    the target. This prevents file corruption if the process is killed mid-write.
+    """
+    dirpath = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix='.tmp')
+    try:
+        with io.open(fd, 'w', encoding=encoding, newline=newline) as f:
+            f.write(data)
+        os.replace(tmp_path, filepath)
+    except BaseException:
+        _try_remove(tmp_path)
+        raise
+
+
 def _convert_to_utf8(filepath, encoding):
-    """Convert file from `encoding` to plain UTF-8 in place.
+    """Convert file from `encoding` to plain UTF-8 atomically.
 
     Returns True on success, False on failure.
+    Preserves the file's original mtime so that tools (e.g. Edit) don't detect
+    a spurious modification after a Pre-hook conversion.
     """
     eu = _get_eu()
+
+    orig_mtime = os.path.getmtime(filepath)
 
     try:
         content = eu.read_with_encoding(filepath, encoding, newline='')
@@ -194,22 +215,25 @@ def _convert_to_utf8(filepath, encoding):
         return False
 
     try:
-        with io.open(filepath, 'w', encoding='utf-8', newline='') as f:
-            f.write(content)
+        _atomic_write(filepath, content, encoding='utf-8', newline='')
     except (IOError, UnicodeEncodeError) as e:
         _debug('Failed to write %s as UTF-8: %s' % (filepath, e))
         return False
 
+    os.utime(filepath, (orig_mtime, orig_mtime))
     _debug('Converted %s: %s -> utf-8' % (filepath, encoding))
     return True
 
 
 def _convert_from_utf8(filepath, encoding):
-    """Convert file from UTF-8 back to `encoding` in place.
+    """Convert file from UTF-8 back to `encoding` atomically.
 
     Returns True on success, False on failure.
+    Preserves the file's mtime so that tools don't detect a spurious modification.
     """
     eu = _get_eu()
+
+    orig_mtime = os.path.getmtime(filepath)
 
     try:
         with io.open(filepath, 'r', encoding='utf-8', newline='') as f:
@@ -218,12 +242,19 @@ def _convert_from_utf8(filepath, encoding):
         _debug('Failed to read %s as UTF-8: %s' % (filepath, e))
         return False
 
+    # Atomic write: write to temp file, then replace original
+    dirpath = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix='.tmp')
     try:
-        eu.write_with_encoding(filepath, content, encoding, newline='')
-    except (IOError, UnicodeEncodeError) as e:
+        os.close(fd)
+        eu.write_with_encoding(tmp_path, content, encoding, newline='')
+        os.replace(tmp_path, filepath)
+    except (IOError, UnicodeEncodeError, OSError) as e:
+        _try_remove(tmp_path)
         _debug('Failed to write %s as %s: %s' % (filepath, encoding, e))
         return False
 
+    os.utime(filepath, (orig_mtime, orig_mtime))
     _debug('Converted %s: utf-8 -> %s' % (filepath, encoding))
     return True
 
