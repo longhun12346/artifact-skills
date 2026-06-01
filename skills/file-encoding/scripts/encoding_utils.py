@@ -136,24 +136,40 @@ def detect_encoding(filepath):
     try:
         import chardet
         result = chardet.detect(raw)
-        if result['confidence'] > 0.7 and result['encoding']:
+        if result['encoding']:
             enc = result['encoding'].lower()
-            return _CODE_PAGE_MAP.get(enc, enc)
+            friendly = _CODE_PAGE_MAP.get(enc, enc)
+            # CJK multi-byte encodings are reliable at lower confidence;
+            # single-byte encodings need higher confidence to avoid false positives.
+            _CJK_ENCODINGS = {'gbk', 'gb2312', 'gb18030', 'shift-jis', 'euc-kr', 'big5'}
+            threshold = 0.4 if friendly in _CJK_ENCODINGS else 0.7
+            if result['confidence'] > threshold:
+                return friendly
     except ImportError:
         pass
 
-    # Heuristic: try system ANSI code page first, then common encodings
+    # Heuristic fallback: try multi-byte CJK encodings first (they reject
+    # invalid byte sequences), then single-byte encodings last (they accept
+    # almost any byte sequence and are essentially "universal decoders").
     sys_enc = _get_sys_encoding()
+    _PERMISSIVE = {'cp1252', 'windows-1252', 'cp1250', 'windows-1250',
+                   'cp1251', 'windows-1251', 'cp1253', 'windows-1253',
+                   'cp1254', 'windows-1254', 'iso-8859-1', 'latin1',
+                   'iso-8859-2', 'latin2'}
+    multi_byte = ['gbk', 'shift-jis', 'euc-kr', 'big5']
     if _IS_WINDOWS:
-        fallbacks = ['gbk', 'shift-jis', 'euc-kr', 'big5',
-                     'windows-1252', 'windows-1251', 'windows-1250']
+        single_byte = ['windows-1252', 'windows-1251', 'windows-1250']
     else:
-        fallbacks = ['gbk', 'shift-jis', 'euc-kr', 'big5',
-                     'iso-8859-1', 'windows-1252']
+        single_byte = ['iso-8859-1', 'windows-1252']
+    # System encoding goes first ONLY if it's multi-byte (restrictive);
+    # permissive single-byte system encodings go with the single-byte group.
     seen = set()
     candidates = []
-    for enc in ([sys_enc] if sys_enc and sys_enc not in ('utf-8', 'ascii') else []) + fallbacks:
-        if enc not in seen:
+    if sys_enc and sys_enc not in ('utf-8', 'ascii') and sys_enc not in _PERMISSIVE:
+        candidates.append(sys_enc)
+        seen.add(sys_enc)
+    for enc in multi_byte + single_byte + ([sys_enc] if sys_enc in _PERMISSIVE else []):
+        if enc and enc not in seen:
             seen.add(enc)
             candidates.append(enc)
     for enc in candidates:

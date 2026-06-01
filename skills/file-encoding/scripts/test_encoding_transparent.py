@@ -45,9 +45,18 @@ def _read_file_bytes(filepath):
 
 
 def _make_gbk_content():
-    """Return bytes of a GBK-encoded C++ file with Chinese comments."""
-    # "// 你好世界" in GBK
-    content = u'// 你好世界\nint main() { return 0; }\n'
+    """Return bytes of a GBK-encoded C++ file with Chinese comments.
+
+    Content must have enough Chinese characters for chardet to reliably
+    identify as GBK even on non-Chinese locale systems (English Windows CI).
+    """
+    content = (u'// 文件描述：测试中文编码处理模块\n'
+               u'// 作者：张三  日期：二零二六年\n'
+               u'#include <stdio.h>\n'
+               u'int main() {\n'
+               u'    printf("你好世界\\n");\n'
+               u'    return 0;\n'
+               u'}\n')
     return content.encode('gbk')
 
 

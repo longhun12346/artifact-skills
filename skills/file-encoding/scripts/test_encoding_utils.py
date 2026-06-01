@@ -87,7 +87,9 @@ class TestDetectEncoding(unittest.TestCase):
             os.unlink(path)
 
     def test_gbk_chinese(self):
-        raw = u'hello 测试中文 world'.encode('gbk')
+        # Enough Chinese for chardet to reliably identify on any locale
+        raw = (u'文件描述：测试中文编码检测功能模块 '
+               u'作者：张三 日期：二零二六年').encode('gbk')
         path = self._write_temp(raw)
         try:
             self.assertEqual(eu.detect_encoding(path), 'gbk')
@@ -337,7 +339,8 @@ class TestRoundTrip(unittest.TestCase):
         self._roundtrip('utf-16-le-bom', u'hello unicode: 你好\n')
 
     def test_gbk_with_chinese(self):
-        self._roundtrip('gbk', u'hello world: 你好世界\n')
+        # Enough Chinese for reliable detection on any locale
+        self._roundtrip('gbk', u'文件描述：测试中文编码处理\n你好世界\n')
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +443,7 @@ class TestConvert(unittest.TestCase):
         return path
 
     def test_convert_gbk_to_utf8(self):
-        path = self._write_file((u'hello 中文 ' * 20).encode('gbk'))
+        path = self._write_file((u'中文编码转换测试内容 ' * 20).encode('gbk'))
         try:
             Args = type('Args', (), {'file': path, 'to': 'utf-8', 'encoding': None})
             ret = eu.cmd_convert(Args())
