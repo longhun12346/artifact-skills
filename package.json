@@ -1,8 +1,16 @@
 {
-  "name": "artifact-skills",
+  "name": "@longhun12346/file-encoding",
   "version": "3.1.0",
-  "description": "Agent skills collection for Claude Code and Pi: encoding guard hooks for Windows C++ projects (GBK/ANSI/UTF-16) that block unsafe native edits and steer agents to transcode tools",
+  "description": "Encoding guard for Windows C++ projects (GBK/ANSI/UTF-16): blocks unsafe native edits and steers agents to transcode tools. Works as a Claude Code plugin and a Pi extension.",
   "license": "MIT",
+  "author": {
+    "name": "longhun12346",
+    "url": "https://github.com/longhun12346"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longhun12346/artifact-skills.git"
+  },
   "keywords": [
     "pi-package",
     "claude-code",
@@ -13,8 +21,16 @@
     "ansi",
     "utf-16",
     "windows",
-    "cpp"
+    "cpp",
+    "mojibake"
   ],
+  "files": [
+    "skills/file-encoding",
+    "!skills/file-encoding/scripts/__pycache__"
+  ],
+  "scripts": {
+    "prepublishOnly": "node scripts/prepublish-check.mjs"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },

@@ -76,11 +76,11 @@ pi install git:github.com/longhun12346/artifact-skills
 
 ### Via npm
 
+Published as [`@longhun12346/file-encoding`](https://www.npmjs.com/package/@longhun12346/file-encoding):
+
 ```bash
-# rename the package to a unique name first (e.g. @longhun12346/artifact-skills)
-npm publish
-# then users install:
-pi install npm:@longhun12346/artifact-skills
+npm publish                 # from the repository root (runs prepublish check)
+pi install npm:@longhun12346/file-encoding
 ```
 
 ## Limitations

@@ -23,6 +23,8 @@ python skills/file-encoding/scripts/install_deps.py
 
 ```bash
 pi install git:github.com/longhun12346/artifact-skills
+# or, via npm:
+pi install npm:@longhun12346/file-encoding
 ```
 
 See [pi/README.md](./skills/file-encoding/pi/README.md) for details.
