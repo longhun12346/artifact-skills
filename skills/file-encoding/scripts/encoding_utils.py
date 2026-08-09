@@ -34,12 +34,6 @@ import locale
 import tempfile
 
 
-# ---------------------------------------------------------------------------
-# Platform detection
-# ---------------------------------------------------------------------------
-_IS_WINDOWS = (os.name == 'nt')
-
-
 def _get_sys_encoding():
     """Get system ANSI encoding. Returns a valid Python encoding name."""
     try:
@@ -223,14 +217,13 @@ def detect_encoding(filepath):
                    'cp1254', 'windows-1254', 'iso-8859-1', 'latin1',
                    'iso-8859-2', 'latin2'}
     multi_byte = ['gbk', 'shift-jis', 'euc-kr', 'big5']
-    if _IS_WINDOWS:
-        # windows-1251 first: single-byte decoders accept almost any bytes, so
-        # without priority the permissive windows-1252 would always win and
-        # Cyrillic files would be misreported as 1252 (which is SAFE and lets
-        # native tools garble them). The Cyrillic check below disambiguates.
-        single_byte = ['windows-1251', 'windows-1252', 'windows-1250']
-    else:
-        single_byte = ['iso-8859-1', 'windows-1252']
+    # Same single-byte candidates on every platform. windows-1251 must come
+    # first: single-byte decoders accept almost any bytes, so without priority
+    # the permissive windows-1252 would win and Cyrillic files would be
+    # misreported as 1252 (which is SAFE and lets native tools garble them).
+    # The Cyrillic check below disambiguates 1251 from Latin text. iso-8859-1
+    # is omitted deliberately - windows-1252 covers it for detection purposes.
+    single_byte = ['windows-1251', 'windows-1252', 'windows-1250']
     # System encoding goes first ONLY if it's multi-byte (restrictive);
     # permissive single-byte system encodings go with the single-byte group.
     seen = set()
