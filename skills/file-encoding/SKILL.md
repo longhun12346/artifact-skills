@@ -1,7 +1,7 @@
 ---
 name: file-encoding
 description: Encoding guard for Windows C++ projects. Detects non-UTF-8 files (ANSI/GBK/UTF-16) and instructs Claude to use safe transcode tools instead of native Edit/Write — files are NEVER modified by the hook. Prevents mojibake corruption of GBK sources.
-version: 3.0.0
+version: 3.1.0
 author: longhun12346
 license: MIT
 tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis, hook]
@@ -24,19 +24,6 @@ corrupted by native Edit/Write/MultiEdit:
 **The hook never converts, rewrites, backs up, or locks any file.** The only
 thing on disk is a tiny state file (in the temp dir) used by PostToolUse to
 detect whether a guarded file was later rewritten into another encoding.
-
-## Why v3 (was: transparent conversion)
-
-Versions 1–2 transparently converted files to UTF-8 before each tool call and
-back afterwards. That approach carried real risks:
-
-- crash between Pre and Post left files in UTF-8 (needed manual recover)
-- Post conversion failure **discarded the model's edits**
-- newer tools (MultiEdit) not covered by the hook matcher corrupted files
-
-v3 trades the hidden conversion risk for an explicit, auditable workflow:
-**the model reads and writes through `encoding_utils.py`, and unsafe native
-edits are blocked with clear instructions.**
 
 ## The workflow Claude should follow
 
@@ -117,9 +104,8 @@ EUC-KR / GBK).
 
 ## When it activates
 
-- Only on monitored extensions: `.cpp` `.h` `.hpp` `.c` `.cc` `.cxx` `.rc` `.bat` `.nsi` `.ini` `.xml`
-- Only when encoding is non-UTF-8 (GBK, Shift-JIS, EUC-KR, Big5, windows-1251, UTF-8 BOM, UTF-16 LE/BE BOM)
-- UTF-8 files pass through with ~70ms subprocess startup
+- Monitored extensions: `.cpp` `.h` `.hpp` `.c` `.cc` `.cxx` `.rc` `.bat` `.nsi` `.ini` `.xml`
+- UTF-8 / ASCII files pass through with ~70ms subprocess startup
 
 ## Supported encodings
 
@@ -162,19 +148,6 @@ EUC-KR / GBK).
 5. **Only monitored extensions** — files outside
    `.cpp/.h/.hpp/.c/.cc/.cxx/.rc/.bat/.nsi/.ini/.xml` are not guarded.
    Add extensions to `MONITORED_EXTENSIONS` in `encoding_transparent.py`.
-
-## Tested environment
-
-| Item | Detail |
-|------|--------|
-| Agent | Claude Code (Claude Sonnet 4 / Opus 4) |
-| OS | Windows 10/11 x64 |
-| Python | 3.9+ |
-| charset-normalizer | 3.x (required) |
-| Test project | pc-international (C++ / NSIS, mixed GBK + UTF-8 BOM + UTF-16 LE BOM) |
-
-> Linux / macOS not yet validated. The hook logic is platform-agnostic; only
-> path separators and temp dir differ.
 
 ## Requirements
 

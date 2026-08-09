@@ -203,19 +203,14 @@ def handle_pre(tool_name, tool_input):
         # Read is non-destructive: allow it, but steer the model to the
         # transcode-read so it sees real content instead of mojibake.
         _print_msg(
-            f'[encoding] INFO: {file_path} is {encoding} (not UTF-8). Direct Read shows mojibake.\n'
-            f'  Read with:    python "{eu_script}" read "{file_path}" --enc {encoding}')
+            f'[encoding] INFO: {file_path} is {encoding}. Read with: python "{eu_script}" read "{file_path}" --enc {encoding}')
         return
 
     # Edit / Write / MultiEdit on a non-UTF-8 file: BLOCK.
     _print_msg(
-        f'[encoding] BLOCKED: {file_path} is {encoding} (not UTF-8). Native Edit/Write would\n'
-        f'  write UTF-8 bytes into a {encoding} file and corrupt it. Use the encoding\n'
-        '  tools instead:\n'
-        f'  Read:    python "{eu_script}" read "{file_path}" --enc {encoding}\n'
-        f'  Edit:    python "{eu_script}" replace "{file_path}" --old "<old>" --new "<new>" --enc {encoding}\n'
-        f'  Rewrite: python "{eu_script}" safe-write "{file_path}" --enc {encoding}   (pipe content via stdin)\n'
-        '  Do NOT use native Edit/Write/MultiEdit on this file.')
+        f'[encoding] BLOCKED: {file_path} is {encoding}. Use transcode tools instead of native Edit/Write:\n'
+        f'  read:    python "{eu_script}" read "{file_path}" --enc {encoding}\n'
+        f'  edit:    python "{eu_script}" replace "{file_path}" --old "<old>" --new "<new>" --enc {encoding}')
     sys.exit(2)
 
 
