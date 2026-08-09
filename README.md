@@ -10,6 +10,23 @@ Claude Code agent skills collection.
 
 ## Install
 
+### Pi (coding agent)
+
+This repository is also a [Pi package](./package.json) (`pi-package` keyword).
+The Pi extension (`skills/file-encoding/pi/file-encoding.ts`) blocks unsafe
+native edits on non-UTF-8 files and rewrites `read` results with decoded
+content. Install the Python detection library first:
+
+```bash
+python skills/file-encoding/scripts/install_deps.py
+```
+
+```bash
+pi install git:github.com/longhun12346/artifact-skills
+```
+
+See [pi/README.md](./skills/file-encoding/pi/README.md) for details.
+
 ### Claude Code plugin (recommended)
 
 This repository is a [Claude Code plugin marketplace](./.claude-plugin/marketplace.json):

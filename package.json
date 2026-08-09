@@ -1,0 +1,29 @@
+{
+  "name": "artifact-skills",
+  "version": "3.1.0",
+  "description": "Agent skills collection for Claude Code and Pi: encoding guard hooks for Windows C++ projects (GBK/ANSI/UTF-16) that block unsafe native edits and steer agents to transcode tools",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "claude-code",
+    "plugin",
+    "skill",
+    "encoding",
+    "gbk",
+    "ansi",
+    "utf-16",
+    "windows",
+    "cpp"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./skills/file-encoding/pi/file-encoding.ts"
+    ],
+    "skills": [
+      "./skills/file-encoding"
+    ]
+  }
+}
