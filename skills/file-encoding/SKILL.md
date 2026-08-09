@@ -149,6 +149,19 @@ EUC-KR / GBK).
    `.cpp/.h/.hpp/.c/.cc/.cxx/.rc/.bat/.nsi/.ini/.xml` are not guarded.
    Add extensions to `MONITORED_EXTENSIONS` in `encoding_transparent.py`.
 
+## Tested environment
+
+| Item | Detail |
+|------|--------|
+| OS | Windows 10/11 x64, Linux (WSL2 Fedora 44, Python 3.14) |
+| Python | 3.9+ |
+| charset-normalizer | 3.x (required) |
+| chardet | optional legacy fallback |
+| Test project | pc-international (C++ / NSIS, mixed GBK + UTF-8 BOM + UTF-16 LE BOM) |
+
+> macOS not yet validated. The hook logic is platform-agnostic; only path
+> separators and temp dir differ.
+
 ## Requirements
 
 - Python 3.9+ (charset-normalizer 3.x)

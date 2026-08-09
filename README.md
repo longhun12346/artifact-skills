@@ -57,7 +57,7 @@ cp -r skills/file-encoding ~/.claude/skills/
 
 - Claude Code
 - Python 3.9+
-- Windows (tested), Linux/macOS (untested)
+- Windows 10/11 (tested), Linux/WSL2 Fedora (tested), macOS (untested)
 
 ## License
 
