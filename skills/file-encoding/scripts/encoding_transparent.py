@@ -1,66 +1,41 @@
 # -*- coding: utf-8 -*-
-"""encoding_transparent.py - Transparent encoding hook for Claude Code.
+"""encoding_transparent.py - Encoding guard hook (inform-only mode, v3).
 
-Makes non-UTF-8 files editable by Claude Code's native Edit/Write/Read tools
-without any special commands or encoding awareness from Claude.
+IMPORTANT DESIGN CHANGE (v3): this hook NEVER modifies files.
 
-How it works:
-  PreToolUse:  Detects encoding; if non-UTF-8, converts file to UTF-8 in place
-               and saves original encoding to a state file.
-  PostToolUse: Reads state file; converts file back from UTF-8 to original encoding.
-  Recover:     Scans for leftover state files (from crashes) and restores files.
+Previous versions transparently converted non-UTF-8 files to UTF-8 before
+Edit/Write/Read and converted them back afterwards. That in-place rewriting
+carried corruption and data-loss risk (crash between Pre/Post, Post failure
+discarding edits, MultiEdit not matched, etc.).
 
-Hook configuration in ~/.claude/settings.json:
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Edit|Write|Read",
-      "hooks": [{"type": "command",
-        "command": "python encoding_transparent.py pre"}]
-    }],
-    "PostToolUse": [{
-      "matcher": "Edit|Write|Read",
-      "hooks": [{"type": "command",
-        "command": "python encoding_transparent.py post"}]
-    }]
-  }
-}
+v3 instead *informs* the model and blocks unsafe operations:
+
+  PreToolUse:
+    - Read on a non-UTF-8 file  -> informational message (tool allowed), tells
+      the model to use `encoding_utils.py read` instead of seeing mojibake.
+    - Edit/Write/MultiEdit on a non-UTF-8 file -> BLOCKED (exit code 2) with
+      instructions to use `encoding_utils.py replace` / `safe-write`.
+    - UTF-8 / ASCII / safe single-byte files pass through untouched.
+
+  PostToolUse:
+    - Light-weight guard: if a previously non-UTF-8 file now detects as UTF-8,
+      a native tool likely rewrote it; print a warning with recovery commands.
+
+  Recover:
+    - Only cleans up leftover state files. Nothing on disk was ever modified
+      by this hook, so there is nothing to restore.
 
 Exit codes:
-  0 - allow tool call (PreToolUse) / success (PostToolUse)
-  2 - block tool call (only used if conversion fails critically)
+  0 - allow tool call / success
+  2 - block tool call (non-UTF-8 file targeted by Edit/Write/MultiEdit)
 """
 
-from __future__ import print_function
-
 import hashlib
-import io
 import json
 import os
 import sys
 import tempfile
 import time
-
-if os.name == 'nt':
-    import msvcrt
-else:
-    import fcntl
-
-
-def _atomic_replace(src, dst):
-    """Atomically replace dst with src. Best-effort on Windows + Py2."""
-    if hasattr(os, 'replace'):
-        os.replace(src, dst)
-    elif os.name == 'nt':
-        # Windows Py2: no atomic replace available
-        try:
-            os.remove(dst)
-        except OSError:
-            pass
-        os.rename(src, dst)
-    else:
-        # POSIX: os.rename atomically replaces existing target
-        os.rename(src, dst)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -71,23 +46,22 @@ MONITORED_EXTENSIONS = {
     '.rc', '.bat', '.nsi', '.ini', '.xml',
 }
 
-# Encodings that Claude's tools handle natively — no conversion needed.
+# Encodings Claude's tools handle natively - no need to warn or block.
 SAFE_ENCODINGS = {
     'utf-8', 'ascii', 'binary',
-    # Single-byte western encodings: chardet often reports these as false
-    # positives on near-ASCII UTF-8 content.  Even if genuinely windows-1252,
-    # Claude's tools can read/write them without garbling (bytes < 0x80 are
-    # identical to ASCII, and high bytes are rare in source code).
-    'windows-1252', 'windows-1250', 'windows-1253', 'windows-1254',
-    'windows-1255', 'windows-1256', 'windows-1257', 'windows-1258',
-    'iso-8859-1', 'iso-8859-2',
+    # Single-byte western encodings: bytes < 0x80 are identical to ASCII and
+    # high bytes are rare in source code, so native tools round-trip safely.
+    # windows-1251 (Cyrillic) is deliberately NOT safe: Cyrillic comments are
+    # common in source code, so a native tool would garble them.
+    'windows-1250', 'windows-1252', 'windows-1253',
+    'windows-1254', 'windows-1255', 'windows-1256', 'windows-1257',
+    'windows-1258', 'iso-8859-1', 'iso-8859-2',
 }
 
-# State directory for tracking files currently in UTF-8 temporary state
+# Minimal state: records the encoding of files we warned about, so PostToolUse
+# can detect if a native tool rewrote them. No backup, no lock - losing this
+# file is harmless (worst case: one missed warning).
 STATE_DIR = os.path.join(tempfile.gettempdir(), 'claude-encoding-hook-state')
-
-# Set ENCODING_TRANSPARENT_DEBUG=1 for stderr diagnostics
-_DEBUG = os.environ.get('ENCODING_TRANSPARENT_DEBUG') == '1'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -108,37 +82,6 @@ def _get_eu():
     return _eu
 
 
-def _debug(msg):
-    if _DEBUG:
-        sys.stderr.write('[encoding_transparent] %s\n' % msg)
-
-
-class _FileLock(object):
-    """Cross-platform file lock context manager."""
-
-    def __init__(self, path):
-        self._path = path + '.lock'
-        self._f = None
-
-    def __enter__(self):
-        if not os.path.isdir(os.path.dirname(self._path)):
-            os.makedirs(os.path.dirname(self._path))
-        self._f = open(self._path, 'w')
-        if os.name == 'nt':
-            msvcrt.locking(self._f.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            fcntl.flock(self._f.fileno(), fcntl.LOCK_EX)
-        return self
-
-    def __exit__(self, *args):
-        if self._f:
-            if os.name == 'nt':
-                msvcrt.locking(self._f.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(self._f.fileno(), fcntl.LOCK_UN)
-            self._f.close()
-
-
 def _state_path(filepath):
     """Return the state file path for a given source file."""
     abspath = os.path.abspath(filepath)
@@ -147,161 +90,58 @@ def _state_path(filepath):
 
 
 def _save_state(filepath, encoding):
-    """Save conversion state: records that filepath was converted to UTF-8."""
+    """Record that `filepath` is `encoding` (also serves as detection cache).
+
+    Stores mtime+size so a later PreToolUse can reuse the cached encoding
+    without re-running the (slow ~200ms) detection library import.
+    """
     if not os.path.isdir(STATE_DIR):
-        os.makedirs(STATE_DIR)
+        try:
+            os.makedirs(STATE_DIR)
+        except OSError:
+            return
+    try:
+        st = os.stat(filepath)
+        mtime, size = st.st_mtime_ns, st.st_size
+    except OSError:
+        mtime, size = 0, 0
     state = {
         'path': os.path.abspath(filepath),
         'encoding': encoding,
+        'mtime': mtime,
+        'size': size,
         'timestamp': time.time(),
     }
-    state_file = _state_path(filepath)
-    json_str = json.dumps(state, ensure_ascii=False)
-    if isinstance(json_str, bytes):
-        json_str = json_str.decode('utf-8')
-    with _FileLock(state_file):
-        with io.open(state_file, 'w', encoding='utf-8') as f:
-            f.write(json_str)
-    _debug('State saved: %s -> %s' % (filepath, encoding))
+    try:
+        with open(_state_path(filepath), 'w') as f:
+            json.dump(state, f, ensure_ascii=False)
+    except IOError:
+        pass
+
+
+def _state_matches_file(state, filepath):
+    """True if the cached state still describes the current file content."""
+    try:
+        st = os.stat(filepath)
+    except OSError:
+        return False
+    return (state.get('mtime') == st.st_mtime_ns and
+            state.get('size') == st.st_size)
 
 
 def _load_state(filepath):
-    """Load conversion state. Returns dict or None."""
-    state_file = _state_path(filepath)
-    if not os.path.exists(state_file):
-        return None
+    """Return saved state dict or None."""
     try:
-        with _FileLock(state_file):
-            with io.open(state_file, 'r', encoding='utf-8') as f:
-                return json.loads(f.read())
+        with open(_state_path(filepath), 'r') as f:
+            return json.load(f)
     except (IOError, ValueError):
         return None
 
 
 def _remove_state(filepath):
-    """Remove state file, backup, and lock file."""
-    state_file = _state_path(filepath)
+    """Remove the state file if present."""
     try:
-        with _FileLock(state_file):
-            os.remove(state_file)
-        _debug('State removed: %s' % filepath)
-    except OSError:
-        pass
-    # Clean up backup and lock files
-    _try_remove(_backup_path(filepath))
-    _try_remove(state_file + '.lock')
-
-
-
-
-def _atomic_write(filepath, data, encoding='utf-8', newline=''):
-    """Write data to filepath atomically via a temp file + os.replace.
-
-    Writes to a temporary file in the same directory, then atomically replaces
-    the target. This prevents file corruption if the process is killed mid-write.
-    """
-    dirpath = os.path.dirname(os.path.abspath(filepath))
-    fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix='.tmp')
-    try:
-        with io.open(fd, 'w', encoding=encoding, newline=newline) as f:
-            f.write(data)
-        _atomic_replace(tmp_path, filepath)
-    except BaseException:
-        _try_remove(tmp_path)
-        raise
-
-
-def _backup_path(filepath):
-    """Return the path for storing original bytes backup."""
-    return _state_path(filepath) + '.backup'
-
-
-def _convert_to_utf8(filepath, encoding):
-    """Convert file from `encoding` to plain UTF-8 atomically.
-
-    Returns True on success, False on failure.
-    Preserves the file's original mtime so that tools (e.g. Edit) don't detect
-    a spurious modification after a Pre-hook conversion.
-    Saves a backup of original raw bytes for recovery if Post fails.
-    """
-    eu = _get_eu()
-
-    orig_mtime = os.path.getmtime(filepath)
-
-    # Save original bytes as backup BEFORE conversion
-    try:
-        with open(filepath, 'rb') as f:
-            original_bytes = f.read()
-    except IOError as e:
-        _debug('Failed to read %s for backup: %s' % (filepath, e))
-        return False
-
-    try:
-        content = eu.read_with_encoding(filepath, encoding, newline='')
-    except (IOError, UnicodeDecodeError) as e:
-        _debug('Failed to read %s as %s: %s' % (filepath, encoding, e))
-        return False
-
-    try:
-        _atomic_write(filepath, content, encoding='utf-8', newline='')
-    except (IOError, UnicodeEncodeError) as e:
-        _debug('Failed to write %s as UTF-8: %s' % (filepath, e))
-        return False
-
-    # Save backup after successful conversion
-    backup = _backup_path(filepath)
-    if not os.path.isdir(STATE_DIR):
-        os.makedirs(STATE_DIR)
-    try:
-        with open(backup, 'wb') as f:
-            f.write(original_bytes)
-    except IOError as e:
-        _debug('Failed to write backup for %s: %s' % (filepath, e))
-        # Non-fatal: conversion succeeded, just no backup available
-
-    os.utime(filepath, (orig_mtime, orig_mtime))
-    _debug('Converted %s: %s -> utf-8' % (filepath, encoding))
-    return True
-
-
-def _convert_from_utf8(filepath, encoding):
-    """Convert file from UTF-8 back to `encoding` atomically.
-
-    Returns True on success, False on failure.
-    Preserves the file's mtime so that tools don't detect a spurious modification.
-    """
-    eu = _get_eu()
-
-    orig_mtime = os.path.getmtime(filepath)
-
-    try:
-        with io.open(filepath, 'r', encoding='utf-8', newline='') as f:
-            content = f.read()
-    except (IOError, UnicodeDecodeError) as e:
-        _debug('Failed to read %s as UTF-8: %s' % (filepath, e))
-        return False
-
-    # Atomic write: write to temp file, then replace original
-    dirpath = os.path.dirname(os.path.abspath(filepath))
-    fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix='.tmp')
-    try:
-        os.close(fd)
-        eu.write_with_encoding(tmp_path, content, encoding, newline='')
-        _atomic_replace(tmp_path, filepath)
-    except (IOError, UnicodeEncodeError, OSError) as e:
-        _try_remove(tmp_path)
-        _debug('Failed to write %s as %s: %s' % (filepath, encoding, e))
-        return False
-
-    os.utime(filepath, (orig_mtime, orig_mtime))
-    _debug('Converted %s: utf-8 -> %s' % (filepath, encoding))
-    return True
-
-
-def _try_remove(path):
-    """Remove a file, ignoring errors if it doesn't exist."""
-    try:
-        os.remove(path)
+        os.remove(_state_path(filepath))
     except OSError:
         pass
 
@@ -310,9 +150,24 @@ def _try_remove(path):
 # Hook handlers
 # ---------------------------------------------------------------------------
 
+def _tool_file(tool_input):
+    """Extract the target file path from tool_input (Edit/Write/MultiEdit/...)."""
+    for key in ('file_path', 'notebook_path'):
+        val = tool_input.get(key)
+        if val:
+            return val
+    return ''
+
+
+def _print_msg(msg):
+    """Emit a message to stdout (seen by the model) and stderr (debug)."""
+    sys.stderr.write(msg + '\n')
+    print(msg)
+
+
 def handle_pre(tool_name, tool_input):
-    """PreToolUse handler: convert non-UTF-8 files to UTF-8 before tool runs."""
-    file_path = tool_input.get('file_path', '')
+    """PreToolUse: inform about non-UTF-8 files; block unsafe edits."""
+    file_path = _tool_file(tool_input)
     if not file_path:
         return
 
@@ -320,196 +175,97 @@ def handle_pre(tool_name, tool_input):
     if ext not in MONITORED_EXTENSIONS:
         return
 
-    # File doesn't exist yet (Write creating new file) — let it through
+    # New file (Write creating it) - nothing to detect yet
     if not os.path.exists(file_path):
         return
 
-    # Already converted by a previous Pre call (e.g. Read followed by Edit)
-    state = _load_state(file_path)
-    if state is not None:
-        _debug('Already converted (state exists): %s' % file_path)
-        return
-
-    # Detect encoding
     eu = _get_eu()
-    encoding = eu.detect_encoding(file_path)
+
+    # Detection cache: reuse the encoding recorded by an earlier call on the
+    # same unchanged file, skipping the ~200ms detection-library import.
+    state = _load_state(file_path)
+    if state and _state_matches_file(state, file_path):
+        encoding = state.get('encoding')
+    else:
+        encoding = eu.detect_encoding(file_path)
 
     if not encoding or encoding in SAFE_ENCODINGS:
+        # File changed to a safe encoding - drop any stale state
+        if state:
+            _remove_state(file_path)
         return
 
-    # Non-UTF-8: convert to UTF-8 and save state
-    if _convert_to_utf8(file_path, encoding):
-        _save_state(file_path, encoding)
-        print('[encoding] Converted %s from %s to UTF-8 for editing. '
-              'Avoid characters outside %s charset.' % (file_path, encoding, encoding))
-    else:
-        # Conversion failed — block the tool call so Claude knows
-        msg = ('[encoding_transparent] ERROR: failed to convert %s (%s -> utf-8). '
-               'File may be corrupted or locked.' % (file_path, encoding))
-        print(msg)
-        sys.exit(2)
+    _save_state(file_path, encoding)
 
+    eu_script = os.path.join(_SCRIPT_DIR, 'encoding_utils.py')
 
-def _infer_sibling_encoding(filepath):
-    """Infer encoding from sibling files with the same extension.
+    if tool_name == 'Read':
+        # Read is non-destructive: allow it, but steer the model to the
+        # transcode-read so it sees real content instead of mojibake.
+        _print_msg(
+            f'[encoding] INFO: {file_path} is {encoding} (not UTF-8). Direct Read shows mojibake.\n'
+            f'  Read with:    python "{eu_script}" read "{file_path}" --enc {encoding}')
+        return
 
-    Scans up to 5 sibling files in the same directory. Returns the encoding
-    if a majority agree, or None if no consensus or no siblings.
-    """
-    ext = os.path.splitext(filepath)[1].lower()
-    dirpath = os.path.dirname(os.path.abspath(filepath))
-    basename = os.path.basename(filepath)
-    eu = _get_eu()
-
-    try:
-        entries = os.listdir(dirpath)
-    except OSError:
-        return None
-
-    siblings = [e for e in entries
-                if os.path.splitext(e)[1].lower() == ext and e != basename]
-    # Sample up to 5
-    siblings = siblings[:5]
-    if not siblings:
-        return None
-
-    encodings = []
-    for name in siblings:
-        path = os.path.join(dirpath, name)
-        if os.path.isfile(path):
-            try:
-                enc = eu.detect_encoding(path)
-                if enc and enc not in SAFE_ENCODINGS and enc != 'binary':
-                    encodings.append(enc)
-            except Exception:
-                pass
-
-    if not encodings:
-        return None
-
-    # Return most common non-safe encoding
-    from collections import Counter
-    most_common = Counter(encodings).most_common(1)[0]
-    # Only trust if at least 2 siblings agree, or if there's only 1 sibling
-    if most_common[1] >= 2 or len(siblings) == 1:
-        return most_common[0]
-    return None
+    # Edit / Write / MultiEdit on a non-UTF-8 file: BLOCK.
+    _print_msg(
+        f'[encoding] BLOCKED: {file_path} is {encoding} (not UTF-8). Native Edit/Write would\n'
+        f'  write UTF-8 bytes into a {encoding} file and corrupt it. Use the encoding\n'
+        '  tools instead:\n'
+        f'  Read:    python "{eu_script}" read "{file_path}" --enc {encoding}\n'
+        f'  Edit:    python "{eu_script}" replace "{file_path}" --old "<old>" --new "<new>" --enc {encoding}\n'
+        f'  Rewrite: python "{eu_script}" safe-write "{file_path}" --enc {encoding}   (pipe content via stdin)\n'
+        '  Do NOT use native Edit/Write/MultiEdit on this file.')
+    sys.exit(2)
 
 
 def handle_post(tool_name, tool_input):
-    """PostToolUse handler: convert file back from UTF-8 to original encoding."""
-    file_path = tool_input.get('file_path', '')
+    """PostToolUse: detect if a guarded file was rewritten into another encoding."""
+    file_path = _tool_file(tool_input)
     if not file_path:
         return
 
-    # Check if we have state for this file (meaning Pre converted it)
     state = _load_state(file_path)
     if state is None:
-        # No state: possibly a new file created by Write.
-        # Check if we should convert it to match sibling encoding.
-        if tool_name == 'Write' and os.path.exists(file_path):
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext in MONITORED_EXTENSIONS:
-                sibling_enc = _infer_sibling_encoding(file_path)
-                if sibling_enc:
-                    if _convert_from_utf8(file_path, sibling_enc):
-                        print('[encoding] New file %s converted to %s '
-                              '(inherited from sibling files).'
-                              % (file_path, sibling_enc))
         return
-
-    encoding = state['encoding']
 
     if not os.path.exists(file_path):
-        # File was deleted by the tool — just clean up state
+        _remove_state(file_path)  # deleted - nothing to check
+        return
+
+    eu = _get_eu()
+    current = eu.detect_encoding(file_path)
+
+    if current == state.get('encoding'):
         _remove_state(file_path)
         return
 
-    if _convert_from_utf8(file_path, encoding):
-        _remove_state(file_path)
-    else:
-        # Conversion back failed — try to restore from backup
-        backup = _backup_path(file_path)
-        if os.path.exists(backup):
-            try:
-                with open(backup, 'rb') as f:
-                    original_bytes = f.read()
-                with open(file_path, 'wb') as f:
-                    f.write(original_bytes)
-                _remove_state(file_path)
-                msg = ('[encoding_transparent] WARNING: could not convert %s back to %s '
-                       '(likely contains characters not in %s charset). '
-                       'Restored original file from backup — your edits were LOST.'
-                       % (file_path, encoding, encoding))
-            except IOError:
-                _remove_state(file_path)
-                msg = ('[encoding_transparent] WARNING: could not convert %s back to %s '
-                       'and backup restore also failed. File remains as UTF-8.'
-                       % (file_path, encoding))
-        else:
-            _remove_state(file_path)
-            msg = ('[encoding_transparent] WARNING: could not convert %s back to %s. '
-                   'No backup available. File remains as UTF-8.'
-                   % (file_path, encoding))
-        sys.stderr.write(msg + '\n')
-        print(msg)
+    _remove_state(file_path)
+    eu_script = os.path.join(_SCRIPT_DIR, 'encoding_utils.py')
+    msg = (
+        f'[encoding] WARNING: {file_path} encoding changed from {state.get("encoding")} to {current} - it was probably\n'
+        '  rewritten by a native tool. If unintended, restore it:\n'
+        f'    python "{eu_script}" convert "{file_path}" --to {state.get("encoding")}\n'
+        f'  or from git: git checkout -- "{file_path}"')
+    _print_msg(msg)
 
 
 def handle_recover():
-    """Recovery handler: restore any files left in UTF-8 state from crashes."""
+    """Clean up leftover state files. No file was ever modified by this hook."""
     if not os.path.isdir(STATE_DIR):
         print('No state files found.')
         return
-
     state_files = [f for f in os.listdir(STATE_DIR) if f.endswith('.json')]
     if not state_files:
         print('No state files found.')
         return
-
-    recovered = 0
-    failed = 0
     for fname in state_files:
-        state_path = os.path.join(STATE_DIR, fname)
         try:
-            with _FileLock(state_path):
-                with io.open(state_path, 'r', encoding='utf-8') as f:
-                    state = json.loads(f.read())
-        except (IOError, ValueError):
-            continue
-
-        filepath = state.get('path', '')
-        encoding = state.get('encoding', '')
-        if not filepath or not encoding:
-            os.remove(state_path)
-            _try_remove(state_path + '.lock')
-            continue
-
-        if not os.path.exists(filepath):
-            os.remove(state_path)
-            _try_remove(state_path + '.lock')
-            continue
-
-        # Try to convert back
-        if _convert_from_utf8(filepath, encoding):
-            os.remove(state_path)
-            _try_remove(state_path + '.lock')
-            recovered += 1
-            print('Recovered: %s -> %s' % (filepath, encoding))
-        else:
-            failed += 1
-            print('FAILED to recover: %s (encoding: %s)' % (filepath, encoding))
-
-    # Clean up any orphaned .lock files
-    for fname in os.listdir(STATE_DIR):
-        if fname.endswith('.lock'):
-            json_file = os.path.join(STATE_DIR, fname[:-5])
-            if not os.path.exists(json_file):
-                _try_remove(os.path.join(STATE_DIR, fname))
-
-    if recovered == 0 and failed == 0:
-        print('No files needed recovery.')
-    else:
-        print('Recovery complete: %d restored, %d failed' % (recovered, failed))
+            os.remove(os.path.join(STATE_DIR, fname))
+        except OSError:
+            pass
+    print('Cleaned %d leftover state file(s). No files needed recovery '
+          '(inform-only mode never modifies files).' % len(state_files))
 
 
 # ---------------------------------------------------------------------------
@@ -532,14 +288,11 @@ def main():
         raw = sys.stdin.read()
         data = json.loads(raw)
     except (ValueError, IOError):
-        # Malformed input — fail open
+        # Malformed input - fail open
         sys.exit(0)
 
     tool_name = data.get('tool_name', '')
     tool_input = data.get('tool_input', {})
-
-    if tool_name not in ('Edit', 'Write', 'Read'):
-        sys.exit(0)
 
     try:
         if mode == 'pre':
@@ -549,6 +302,8 @@ def main():
         else:
             sys.stderr.write('Unknown mode: %s\n' % mode)
             sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
         # Fail-open: any unexpected error allows the tool call through
         sys.stderr.write('[encoding_transparent] Unexpected error (fail-open): %s\n' % e)

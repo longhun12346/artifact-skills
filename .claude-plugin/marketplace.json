@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace-manifest.json",
+  "name": "artifact-skills",
+  "description": "Claude Code agent skills collection",
+  "plugins": [
+    {
+      "name": "file-encoding",
+      "source": "./skills/file-encoding",
+      "description": "Encoding guard hooks for Windows C++ projects (GBK/ANSI/UTF-16): blocks unsafe native edits, steers Claude to transcode tools"
+    }
+  ]
+}

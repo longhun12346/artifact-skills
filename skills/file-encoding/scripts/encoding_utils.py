@@ -6,8 +6,15 @@ Usage:
   python encoding_utils.py read <file> [--enc E]      # print decoded content to stdout
   python encoding_utils.py write <file> --enc E       # read stdin, write with encoding E
   python encoding_utils.py safe-write <file> [--enc E]  # auto-detect + overwrite from stdin
+  python encoding_utils.py replace <file> --old S --new S [--enc E] [--all] [--expect N]
+                                                    # precise single/multi replacement
   python encoding_utils.py convert <file> --to E [--enc F]  # convert encoding in-place
   python encoding_utils.py --version                  # print version
+
+replace is the safe edit channel for non-UTF-8 files: it reads with the file's
+real encoding, replaces the old string, and writes back with the SAME encoding.
+It never modifies the file unless old_string is found exactly once (or --all
+is given) and every new character is encodable in the target charset.
 
 Supported encoding names (friendly -> Python):
   gbk, shift-jis, euc-kr, big5, utf-8, utf-8-bom, utf-16-le-bom, utf-16-be-bom,
@@ -17,19 +24,19 @@ This module is also imported by encoding_transparent.py (the hook) for its
 detect_encoding(), read_with_encoding(), write_with_encoding() functions.
 """
 
-__version__ = "2.2.0"
+__version__ = "3.1.0"
 
 import argparse
 import io
 import os
 import sys
 import locale
+import tempfile
 
 
 # ---------------------------------------------------------------------------
-# Python 2 compat
+# Platform detection
 # ---------------------------------------------------------------------------
-_IS_PY2 = (sys.version_info[0] == 2)
 _IS_WINDOWS = (os.name == 'nt')
 
 
@@ -51,9 +58,6 @@ def _read_stdin_unicode(binary_mode=False):
     on Windows regardless of console code page. Use for raw file content.
     binary_mode=False: read via sys.stdin in text mode. Use for JSON/metadata.
     """
-    if _IS_PY2:
-        raw = sys.stdin.read()
-        return raw.decode('utf-8') if isinstance(raw, bytes) else raw
     if binary_mode:
         return sys.stdin.buffer.read().decode('utf-8')
     return sys.stdin.read()
@@ -100,6 +104,78 @@ _CODE_PAGE_MAP = {
 }
 
 
+def _normalize_encoding_name(enc):
+    """Normalize a detector's encoding name to our friendly names.
+
+    charset-normalizer reports Python codec names (utf_8, gb18030, cp932,
+    cp949, big5hkscs...); chardet reports uppercase/legacy names
+    (GB18030, CP949, Windows-1251...). Both are mapped to the friendly
+    names used across this project (gbk, shift-jis, euc-kr, big5, ...).
+    """
+    if not enc:
+        return None
+    enc = enc.lower().replace('_', '-')
+    if enc in ('utf-8', 'ascii'):
+        return enc
+    return _CODE_PAGE_MAP.get(enc, enc)
+
+
+def _detect_with_charset_normalizer(raw):
+    """Detect via charset-normalizer (modern, fast). Returns friendly name or None.
+
+    Only accepts the result when the match has statistical coherence
+    (percent_coherence > 0): on very short inputs charset-normalizer falls back
+    to guessing (coherence 0.0) and frequently misreports, e.g. a 3-character
+    GBK comment as big5 or a Windows-1251 comment as big5. Those cases are
+    left to chardet / the heuristic fallback, which handle short CJK better.
+    """
+    try:
+        from charset_normalizer import from_bytes
+        match = from_bytes(raw).best()
+        if match and match.encoding and match.percent_coherence > 0:
+            enc = _normalize_encoding_name(match.encoding)
+            # Verify the reported encoding actually decodes the bytes; this
+            # rejects cross-family misreports (e.g. Cyrillic bytes as big5).
+            try:
+                raw.decode(_friendly_to_python(enc))
+                return enc
+            except (UnicodeDecodeError, LookupError):
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def _detect_with_chardet(raw):
+    """Detect via chardet (legacy fallback). Returns friendly name or None."""
+    try:
+        import chardet
+        result = chardet.detect(raw)
+        if result['encoding']:
+            enc = result['encoding'].lower()
+            friendly = _CODE_PAGE_MAP.get(enc, enc)
+            # CJK multi-byte encodings are reliable at lower confidence;
+            # single-byte encodings need higher confidence to avoid false positives.
+            _CJK_ENCODINGS = {'gbk', 'gb2312', 'gb18030', 'shift-jis', 'euc-kr', 'big5'}
+            threshold = 0.4 if friendly in _CJK_ENCODINGS else 0.7
+            if result['confidence'] > threshold:
+                return friendly
+    except ImportError:
+        pass
+    return None
+
+
+def _cyrillic_distinct(text):
+    """Count DISTINCT Cyrillic characters (U+0400-U+04FF) in decoded text.
+
+    Distinctness (not raw count) is the discriminator: in windows-1251 every
+    accented Latin char maps to a Cyrillic char (é -> й), so 'café déjà vu'
+    decodes to just 2 distinct Cyrillic chars, while real Cyrillic text has
+    many. Requiring >= 3 distinct chars separates the two reliably.
+    """
+    return len(set(ch for ch in text if u'\u0400' <= ch <= u'\u04ff'))
+
+
 def detect_encoding(filepath):
     """Detect text file encoding. Returns friendly name, or 'binary'."""
     with open(filepath, 'rb') as f:
@@ -122,32 +198,21 @@ def detect_encoding(filepath):
         pass
 
     # No BOM, not binary, not pure ASCII - try UTF-8 first (strict),
-    # then chardet, then heuristic ANSI fallback.
-    # UTF-8 check must come before chardet/heuristic: single-byte ANSI encodings
-    # (e.g. windows-1251) accept almost any byte sequence, so they would win the
-    # heuristic race even when the file is valid UTF-8.
+    # then charset-normalizer, then chardet, then heuristic ANSI fallback.
+    # The UTF-8 check must come first: single-byte ANSI encodings accept
+    # almost any byte sequence, so they would win the race otherwise.
     try:
         raw.decode('utf-8')
         return 'utf-8'
     except UnicodeDecodeError:
         pass
 
-    # Try chardet (best for CJK — uses language-specific n-gram models),
-    # then fall through to heuristic.
-    try:
-        import chardet
-        result = chardet.detect(raw)
-        if result['encoding']:
-            enc = result['encoding'].lower()
-            friendly = _CODE_PAGE_MAP.get(enc, enc)
-            # CJK multi-byte encodings are reliable at lower confidence;
-            # single-byte encodings need higher confidence to avoid false positives.
-            _CJK_ENCODINGS = {'gbk', 'gb2312', 'gb18030', 'shift-jis', 'euc-kr', 'big5'}
-            threshold = 0.4 if friendly in _CJK_ENCODINGS else 0.7
-            if result['confidence'] > threshold:
-                return friendly
-    except ImportError:
-        pass
+    enc = _detect_with_charset_normalizer(raw)
+    if enc:
+        return enc
+    enc = _detect_with_chardet(raw)
+    if enc:
+        return enc
 
     # Heuristic fallback: try multi-byte CJK encodings first (they reject
     # invalid byte sequences), then single-byte encodings last (they accept
@@ -159,7 +224,11 @@ def detect_encoding(filepath):
                    'iso-8859-2', 'latin2'}
     multi_byte = ['gbk', 'shift-jis', 'euc-kr', 'big5']
     if _IS_WINDOWS:
-        single_byte = ['windows-1252', 'windows-1251', 'windows-1250']
+        # windows-1251 first: single-byte decoders accept almost any bytes, so
+        # without priority the permissive windows-1252 would always win and
+        # Cyrillic files would be misreported as 1252 (which is SAFE and lets
+        # native tools garble them). The Cyrillic check below disambiguates.
+        single_byte = ['windows-1251', 'windows-1252', 'windows-1250']
     else:
         single_byte = ['iso-8859-1', 'windows-1252']
     # System encoding goes first ONLY if it's multi-byte (restrictive);
@@ -175,10 +244,21 @@ def detect_encoding(filepath):
             candidates.append(enc)
     for enc in candidates:
         try:
-            raw.decode(enc)
-            return _CODE_PAGE_MAP.get(enc, enc)
+            text = raw.decode(enc)
         except Exception:
-            pass
+            continue
+        if enc in ('windows-1251', 'cp1251'):
+            # Only accept 1251 when the decoded text actually contains
+            # enough distinct Cyrillic characters; otherwise it is probably
+            # Latin-1/1252 text (where accents map to Cyrillic chars).
+            if _cyrillic_distinct(text) >= 3:
+                return 'windows-1251'
+            continue
+        if enc in ('windows-1252', 'cp1252') and _cyrillic_distinct(text) >= 3:
+            # Decodes, but the result is mostly Cyrillic - windows-1251 is a
+            # better guess; don't return a SAFE encoding for it.
+            continue
+        return _CODE_PAGE_MAP.get(enc, enc)
 
     return 'utf-8'
 
@@ -247,22 +327,41 @@ def read_with_encoding(filepath, enc, newline=''):
             return f.read()
 
 
+def _atomic_write_bytes(filepath, data):
+    """Write bytes to filepath atomically (temp file + os.replace).
+
+    A crash mid-write can never leave a half-written file behind.
+    """
+    dirpath = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        os.replace(tmp_path, filepath)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def write_with_encoding(filepath, content, enc, newline=''):
     """Write unicode content to file, handling BOM for utf-16-le-bom/be-bom.
 
-    Writes BOM prefix + encoded content for UTF-16 BOM variants.
+    Encodes the content fully in memory BEFORE touching the file, so a
+    UnicodeEncodeError never truncates or corrupts an existing file, and
+    writes atomically so a crash never leaves a half-written file.
     """
     if enc in _BOM_FOR_ENCODING:
         bom = _BOM_FOR_ENCODING[enc]
         pyenc = _friendly_to_python(enc)
         encoded = content.encode(pyenc)
-        with open(filepath, 'wb') as f:
-            f.write(bom)
-            f.write(encoded)
+        _atomic_write_bytes(filepath, bom + encoded)
     else:
         pyenc = _friendly_to_python(enc)
-        with io.open(filepath, 'w', encoding=pyenc, newline=newline) as f:
-            f.write(content)
+        encoded = content.encode(pyenc)
+        _atomic_write_bytes(filepath, encoded)
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +397,16 @@ def cmd_read(args):
         else:
             raise
 
-    if _IS_PY2:
-        content = content.encode('utf-8')
+    max_lines = getattr(args, 'max_lines', None)
+    if max_lines is not None:
+        lines = content.split('\n')
+        total = len(lines)
+        if total > max_lines:
+            content = '\n'.join(lines[:max_lines])
+            sys.stderr.write(
+                "[encoding_utils] WARN: output truncated to first %d of %d lines "
+                "(--max-lines %d)\n" % (max_lines, total, max_lines))
+
     sys.stdout.write(content)
     return 0
 
@@ -309,8 +416,15 @@ def cmd_write(args):
         sys.stderr.write("ERROR: --encoding required for write\n")
         return 1
 
-    content = _read_stdin_unicode()
-    write_with_encoding(args.file, content, args.encoding, newline='')
+    content = _read_stdin_unicode(binary_mode=True)
+    try:
+        write_with_encoding(args.file, content, args.encoding, newline='')
+    except UnicodeEncodeError as e:
+        sys.stderr.write(
+            "ERROR: content contains character(s) not representable in %s: %s\n"
+            "File NOT modified. Use a different wording or convert the file to UTF-8.\n"
+            % (args.encoding, e))
+        return 1
 
     print("OK: %s written with encoding %s" % (args.file, args.encoding))
     return 0
@@ -339,6 +453,64 @@ def cmd_safe_write(args):
     return 0
 
 
+def cmd_replace(args):
+    """Precise replacement in a file, preserving its original encoding.
+
+    Safe edit channel for non-UTF-8 files. The file is NOT modified unless:
+      - old_string is found (exactly once by default, or all with --all)
+      - every character in new_string is encodable in the target charset
+    """
+    if not os.path.exists(args.file):
+        sys.stderr.write("ERROR: file does not exist: %s\n" % args.file)
+        return 1
+    if not os.path.isfile(args.file):
+        sys.stderr.write("ERROR: not a file: %s\n" % args.file)
+        return 1
+    enc = args.encoding or detect_encoding(args.file)
+    if enc == 'binary':
+        sys.stderr.write("ERROR: cannot edit binary file\n")
+        return 1
+    if args.old == u'':
+        sys.stderr.write("ERROR: --old must not be empty\n")
+        return 1
+
+    try:
+        content = read_with_encoding(args.file, enc, newline='')
+    except UnicodeDecodeError as e:
+        sys.stderr.write("ERROR: cannot decode %s as %s: %s\n" % (args.file, enc, e))
+        return 1
+
+    count = content.count(args.old)
+    if count == 0:
+        sys.stderr.write(
+            "ERROR: old_string not found in %s (encoding %s). File NOT modified.\n"
+            "Check exact text, whitespace and newline differences (\\r\\n vs \\n).\n"
+            % (args.file, enc))
+        return 1
+    if args.expect is not None and count != args.expect:
+        sys.stderr.write(
+            "ERROR: old_string found %d time(s), expected %d. File NOT modified.\n"
+            "Use --all to replace every occurrence, or adjust --expect.\n"
+            % (count, args.expect))
+        return 1
+
+    n = count if args.all else 1
+    new_content = content.replace(args.old, args.new, n)
+
+    try:
+        write_with_encoding(args.file, new_content, enc, newline='')
+    except UnicodeEncodeError as e:
+        sys.stderr.write(
+            "ERROR: new_string contains character(s) not representable in %s: %s\n"
+            "File NOT modified. Use a different wording or convert the file to UTF-8.\n"
+            % (enc, e))
+        return 1
+
+    print("OK: replaced %d occurrence(s) in %s (encoding %s preserved)"
+          % (n, args.file, enc))
+    return 0
+
+
 def cmd_convert(args):
     """Convert a file from its current encoding to a different encoding in-place."""
     enc = args.encoding or detect_encoding(args.file)
@@ -350,7 +522,14 @@ def cmd_convert(args):
         return 0
 
     content = read_with_encoding(args.file, enc, newline='')
-    write_with_encoding(args.file, content, args.to, newline='')
+    try:
+        write_with_encoding(args.file, content, args.to, newline='')
+    except UnicodeEncodeError as e:
+        sys.stderr.write(
+            "ERROR: content contains character(s) not representable in %s: %s\n"
+            "File NOT modified (atomic write left the original intact).\n"
+            % (args.to, e))
+        return 1
 
     print("OK: converted %s -> %s" % (enc, args.to))
     return 0
@@ -361,6 +540,13 @@ def cmd_convert(args):
 # ---------------------------------------------------------------------------
 
 def main():
+    # Ensure stdout is UTF-8 even on Windows console/pipe (default code page
+    # cp936/cp1252 would mojibake the decoded Chinese content Claude reads).
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(description='File encoding detection & conversion toolkit')
     parser.add_argument('--version', action='version', version='encoding_utils.py ' + __version__)
     sub = parser.add_subparsers(dest='command')
@@ -372,6 +558,8 @@ def main():
     p_read.add_argument('file', help='File path')
     p_read.add_argument('--encoding', '--enc', default=None, dest='encoding',
                         help='Encoding override (default: auto-detect)')
+    p_read.add_argument('--max-lines', type=int, default=None, dest='max_lines',
+                        help='Only print the first N lines (saves tokens on large files)')
 
     p_write = sub.add_parser('write', help='Write stdin to file with specified encoding')
     p_write.add_argument('file', help='File path')
@@ -390,6 +578,17 @@ def main():
     p_convert.add_argument('--encoding', '--enc', default=None, dest='encoding',
                            help='Source encoding override (default: auto-detect)')
 
+    p_replace = sub.add_parser('replace', help='Precise replacement preserving file encoding')
+    p_replace.add_argument('file', help='File path')
+    p_replace.add_argument('--old', required=True, help='Text to find (exact match)')
+    p_replace.add_argument('--new', required=True, help='Replacement text')
+    p_replace.add_argument('--encoding', '--enc', default=None, dest='encoding',
+                           help='Encoding override (default: auto-detect)')
+    p_replace.add_argument('--all', action='store_true',
+                           help='Replace every occurrence (default: first only)')
+    p_replace.add_argument('--expect', type=int, default=None,
+                           help='Expected number of occurrences; abort if different')
+
     args = parser.parse_args()
 
     if args.command == 'detect':
@@ -402,6 +601,8 @@ def main():
         return cmd_safe_write(args)
     elif args.command == 'convert':
         return cmd_convert(args)
+    elif args.command == 'replace':
+        return cmd_replace(args)
     else:
         parser.print_help()
         return 0

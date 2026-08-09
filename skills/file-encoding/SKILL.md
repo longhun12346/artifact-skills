@@ -1,7 +1,7 @@
 ---
 name: file-encoding
-description: Transparent encoding handling for Windows C++ projects. Automatically converts non-UTF-8 files (ANSI/GBK/UTF-8 BOM/UTF-16 LE BOM) before Edit/Write/Read and restores encoding after — no special commands needed.
-version: 2.2.0
+description: Encoding guard for Windows C++ projects. Detects non-UTF-8 files (ANSI/GBK/UTF-16) and instructs Claude to use safe transcode tools instead of native Edit/Write — files are NEVER modified by the hook. Prevents mojibake corruption of GBK sources.
+version: 3.0.0
 author: longhun12346
 license: MIT
 tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis, hook]
@@ -9,34 +9,130 @@ tags: [encoding, windows, cpp, ansi, gbk, utf-16, nsis, hook]
 
 # file-encoding
 
-## How it works
+## How it works (v3 - inform-only, no conversion)
 
-This skill installs **transparent hooks** that handle file encoding automatically:
+This skill installs **guard hooks** that protect non-UTF-8 files from being
+corrupted by native Edit/Write/MultiEdit:
 
-1. **Before** Edit/Write/Read: detects encoding → converts non-UTF-8 files to UTF-8 in place
-2. Claude's tool runs normally on the UTF-8 file
-3. **After** Edit/Write/Read: converts back to original encoding
+1. **PreToolUse** detects the file's encoding (only monitored extensions).
+2. File is non-UTF-8 (GBK, Shift-JIS, Big5, windows-1251, UTF-16 BOM, ...):
+   - `Read` → informational message: use `encoding_utils.py read` instead.
+   - `Edit` / `Write` / `MultiEdit` → **BLOCKED** with instructions to use
+     `encoding_utils.py replace` / `safe-write`.
+3. UTF-8 / ASCII / safe single-byte files pass through untouched.
 
-**You don't need to do anything special.** Just use Edit/Write/Read normally — the hooks handle encoding invisibly.
+**The hook never converts, rewrites, backs up, or locks any file.** The only
+thing on disk is a tiny state file (in the temp dir) used by PostToolUse to
+detect whether a guarded file was later rewritten into another encoding.
+
+## Why v3 (was: transparent conversion)
+
+Versions 1–2 transparently converted files to UTF-8 before each tool call and
+back afterwards. That approach carried real risks:
+
+- crash between Pre and Post left files in UTF-8 (needed manual recover)
+- Post conversion failure **discarded the model's edits**
+- newer tools (MultiEdit) not covered by the hook matcher corrupted files
+
+v3 trades the hidden conversion risk for an explicit, auditable workflow:
+**the model reads and writes through `encoding_utils.py`, and unsafe native
+edits are blocked with clear instructions.**
+
+## The workflow Claude should follow
+
+When the hook reports that a file is non-UTF-8 (e.g. `gbk`):
+
+```bash
+# 1. Read (instead of native Read)
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read "file.cpp" --enc gbk
+
+# 2. Make a precise edit (instead of native Edit)
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py replace "file.cpp" \
+    --old "旧文本" --new "新文本" --enc gbk
+
+# 3. Or rewrite the whole file (instead of native Write)
+#    (pipe full content via stdin; encoding auto-preserved from the file)
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write "file.cpp"
+```
+
+`replace` is the safe edit channel:
+
+- reads with the file's **real encoding** and writes back with the same one
+- **never modifies the file** if `old_string` is not found, if the occurrence
+  count differs from `--expect`, or if `new_string` contains characters the
+  target charset cannot represent
+- use `--all` to replace every occurrence, `--expect N` to verify the count
+
+## Manual commands (encoding_utils.py)
+
+```
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py detect <file>
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read <file> [--enc E] [--max-lines N]
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write <file> --enc E
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write <file> [--enc E]
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py replace <file> --old S --new S [--enc E] [--all] [--expect N]
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py convert <file> --to E [--enc F]
+```
+
+## New file creation
+
+New files created with native Write are UTF-8, which is fine unless the
+project requires another encoding. To create a GBK file matching its siblings:
+
+```bash
+echo "content" | python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write "new_file.cpp" --enc gbk
+```
+
+## Crash recovery
+
+Since the hooks never modify files, **there is nothing to recover**. If state
+files accumulate (harmless), clean them:
+
+```bash
+python ${CLAUDE_SKILL_DIR}/scripts/encoding_transparent.py recover
+```
+
+If the model ever does write a non-UTF-8 file with a native tool anyway, the
+PostToolUse hook warns and gives restore commands (`encoding_utils.py convert`
+back to the original encoding, or `git checkout -- <file>`).
+
+## Installation (Claude Code plugin)
+
+```bash
+claude plugin marketplace add longhun12346/artifact-skills
+claude plugin install artifact-skills file-encoding
+
+# Python detection library (required for reliable encoding detection)
+python ${CLAUDE_SKILL_DIR}/scripts/install_deps.py
+python ${CLAUDE_SKILL_DIR}/scripts/install_deps.py --check
+```
+
+The plugin's `hooks/hooks.json` registers the guard hooks automatically
+(matching `Edit|Write|MultiEdit|Read|NotebookEdit`).
+
+`install_deps.py` installs **`charset-normalizer`** (required) and **`chardet`**
+(optional legacy fallback) via `pip` if missing. If `pip` is unavailable,
+detection falls back to heuristics (less reliable between Shift-JIS /
+EUC-KR / GBK).
 
 ## When it activates
 
 - Only on monitored extensions: `.cpp` `.h` `.hpp` `.c` `.cc` `.cxx` `.rc` `.bat` `.nsi` `.ini` `.xml`
-- Only when encoding is non-UTF-8 (GBK, Shift-JIS, EUC-KR, Big5, UTF-8 BOM, UTF-16 LE BOM)
-- UTF-8 files pass through with minimal overhead (~70ms subprocess startup)
+- Only when encoding is non-UTF-8 (GBK, Shift-JIS, EUC-KR, Big5, windows-1251, UTF-8 BOM, UTF-16 LE/BE BOM)
+- UTF-8 files pass through with ~70ms subprocess startup
 
 ## Supported encodings
 
-### Auto-converted (hook converts to/from UTF-8)
+### Guarded (block Edit/Write, instruct to use tools)
 
 | Category | Encodings | Typical file types | Detection reliability |
 |----------|-----------|-------------------|---------------------|
 | CJK multibyte | gbk, shift-jis, euc-kr, big5 | `.cpp` `.h` `.rc` `.bat` | High (distinctive byte patterns) |
-| Cyrillic | windows-1251 | `.cpp` `.h` `.rc` | High (chardet reliable for Cyrillic) |
+| Cyrillic | windows-1251 | `.cpp` `.h` `.rc` | High (charset-normalizer reliable for Cyrillic) |
 | Unicode BOM | utf-8-bom | `.nsi` | Exact (BOM prefix) |
 | UTF-16 | utf-16-le-bom, utf-16-be-bom | `.ini` | Exact (BOM prefix) |
 
-### Pass-through (no conversion needed)
+### Pass-through (no warning, native tools safe)
 
 | Category | Encodings | Reason |
 |----------|-----------|--------|
@@ -45,73 +141,27 @@ This skill installs **transparent hooks** that handle file encoding automaticall
 | Other single-byte | windows-1253~1258 | Same; detection unreliable between these |
 | Binary | binary | Not text |
 
-### Design rationale
-
-- **CJK + Cyrillic → convert**: byte patterns distinctive, chardet reliable, non-ASCII content is substantial (Claude cannot understand without conversion)
-- **Western single-byte → pass-through**: hard to distinguish between these encodings reliably; incorrect conversion risks data corruption; non-ASCII bytes rare in source code (occasional accented chars in comments)
-- If `chardet` is not installed, heuristic fallback may misidentify Shift-JIS / EUC-KR as GBK on Chinese Windows. Install `chardet` for reliable results.
-
-## New file creation
-
-The hooks only convert **existing** files. When creating new files with Write, the file will be UTF-8 by default.
-
-If the project requires a different encoding for new files (e.g., GBK for `.cpp`), use encoding_utils.py:
-
-```bash
-# Check what encoding siblings use
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py detect "existing_file.cpp"
-
-# Write new file with that encoding
-echo "content" | python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write "new_file.cpp" --enc gbk
-```
-
-## Manual commands (encoding_utils.py)
-
-For operations outside the hook cycle (batch conversion, explicit encoding control):
-
-```
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py detect <file>
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py read <file> [--enc E]
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py write <file> --enc E
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py convert <file> --to E [--enc F]
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_utils.py safe-write <file> [--enc E]
-```
-
-## Crash recovery
-
-If Claude Code crashes mid-operation (file left in UTF-8 state):
-
-```bash
-python ${CLAUDE_SKILL_DIR}/scripts/encoding_transparent.py recover
-```
-
-## Installation
-
-```bash
-python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py           # install hooks
-python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --check   # verify installation
-python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --uninstall  # remove hooks
-```
-
 ## Limitations
 
-1. **New files default to UTF-8** — Write creates files as UTF-8. If the project requires GBK/other encoding for new `.cpp`/`.h` files, you must explicitly use `encoding_utils.py safe-write --enc`.
+1. **Model compliance** — the design relies on the model following the
+   instructions; native Edit/Write/MultiEdit on non-UTF-8 files are blocked,
+   which enforces compliance. The PostToolUse hook is a second line of defense.
 
-2. **Concurrent sessions** — File locking prevents state corruption, but two sessions converting the same file simultaneously may still produce unexpected results. In practice this is rare (one session per project).
+2. **`replace` is exact-match** — `old_string` must match the file content
+   including whitespace and newlines (`\r\n` vs `\n`). Read with
+   `encoding_utils.py read` first and copy the exact text.
 
-3. **Process kill without PostToolUse** — If Claude Code is forcefully killed between Pre and Post, the file remains in temporary UTF-8 state. Run `encoding_transparent.py recover` to restore, or the file will stay UTF-8 until the next Pre/Post cycle.
+3. **Charset ceiling** — characters not representable in the target charset
+   (e.g. emoji in GBK) cannot be written; `replace` fails safely and explains.
 
-4. **Only monitored extensions** — Files outside `.cpp/.h/.hpp/.c/.cc/.cxx/.rc/.bat/.nsi/.ini/.xml` are not handled, even if they have non-UTF-8 encoding. Add extensions to `MONITORED_EXTENSIONS` in `encoding_transparent.py` if needed.
+4. **Encoding detection without a detection library** — without
+   `charset-normalizer`/`chardet`, heuristic fallback may misidentify
+   Shift-JIS/EUC-KR as GBK on Chinese Windows. Run `install_deps.py` for
+   reliable results.
 
-5. **Encoding detection without chardet** — Without `chardet`, detection uses a heuristic fallback that tries codecs in order. This can misidentify Shift-JIS/EUC-KR as GBK on Chinese Windows. Install `chardet` for reliable results.
-
-## Debugging
-
-Set `ENCODING_TRANSPARENT_DEBUG=1` to see conversion details on stderr:
-
-```bash
-set ENCODING_TRANSPARENT_DEBUG=1 && claude
-```
+5. **Only monitored extensions** — files outside
+   `.cpp/.h/.hpp/.c/.cc/.cxx/.rc/.bat/.nsi/.ini/.xml` are not guarded.
+   Add extensions to `MONITORED_EXTENSIONS` in `encoding_transparent.py`.
 
 ## Tested environment
 
@@ -119,13 +169,15 @@ set ENCODING_TRANSPARENT_DEBUG=1 && claude
 |------|--------|
 | Agent | Claude Code (Claude Sonnet 4 / Opus 4) |
 | OS | Windows 10/11 x64 |
-| Python | 2.7, 3.8+  |
-| chardet | 5.x (recommended) |
+| Python | 3.9+ |
+| charset-normalizer | 3.x (required) |
 | Test project | pc-international (C++ / NSIS, mixed GBK + UTF-8 BOM + UTF-16 LE BOM) |
 
-> Linux / macOS not yet validated. The hook logic is platform-agnostic; only path separators and temp dir differ.
+> Linux / macOS not yet validated. The hook logic is platform-agnostic; only
+> path separators and temp dir differ.
 
 ## Requirements
 
-- Python 2.6+ or 3.x
-- **Recommended:** `chardet` for reliable encoding detection (`pip install chardet`)
+- Python 3.9+ (charset-normalizer 3.x)
+- `charset-normalizer` for reliable encoding detection — installed
+  automatically by `install_deps.py`; `chardet` optional as legacy fallback

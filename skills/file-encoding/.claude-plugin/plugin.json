@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "file-encoding",
+  "version": "3.1.0",
+  "description": "Encoding guard hooks for Windows C++ projects (GBK/ANSI/UTF-16). Inform-only mode: detects non-UTF-8 files, blocks unsafe native Edit/Write/MultiEdit, and instructs Claude to use encoding_utils.py read/replace/safe-write. Hooks never modify files.",
+  "author": {
+    "name": "longhun12346"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/longhun12346/artifact-skills",
+  "keywords": [
+    "encoding",
+    "windows",
+    "cpp",
+    "gbk",
+    "ansi",
+    "utf-16",
+    "nsis",
+    "hooks"
+  ],
+  "skills": "./"
+}
